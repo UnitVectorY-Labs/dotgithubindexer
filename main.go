@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -304,6 +305,9 @@ func updateRepositoriesManifest(dbPath string, repoName string) error {
 	}
 	manifest.Repositories = append(manifest.Repositories, repoName)
 
+	// Sort repositories alphabetically
+	sort.Strings(manifest.Repositories)
+
 	updatedData, err := yaml.Marshal(&manifest)
 	if err != nil {
 		return err
@@ -341,6 +345,19 @@ func updateActionIndex(dbPath, actionName, repoName, hash string) error {
 	}
 
 	index.Repositories[repoName] = hash
+
+	// Sort repositories alphabetically by key
+	sortedKeys := make([]string, 0, len(index.Repositories))
+	for k := range index.Repositories {
+		sortedKeys = append(sortedKeys, k)
+	}
+	sort.Strings(sortedKeys)
+
+	sortedRepositories := make(map[string]string)
+	for _, k := range sortedKeys {
+		sortedRepositories[k] = index.Repositories[k]
+	}
+	index.Repositories = sortedRepositories
 
 	updatedData, err := yaml.Marshal(&index)
 	if err != nil {
