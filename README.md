@@ -32,12 +32,12 @@ This application does not utilize a database, instead the content is output to t
 .
 └── db
     ├── actions
-    │   ├── build
-    │   │   ├── 559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd.yaml
-    │   │   ├── df7e70e5021544f4834bbee64a9e3789febc4be81470df629cad6ddb03320a5c.yaml
+    │   ├── build.yml
+    │   │   ├── 559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd
+    │   │   ├── df7e70e5021544f4834bbee64a9e3789febc4be81470df629cad6ddb03320a5c
     │   │   └── index.yaml
-    │   └── release
-    │       ├── 6b23c0d5f35d1b11f9b683f0b0a617355deb11277d91ae091d399c655b87940d.yaml
+    │   └── release.yml
+    │       ├── 6b23c0d5f35d1b11f9b683f0b0a617355deb11277d91ae091d399c655b87940d
     │       └── index.yaml
     └── repositories.yaml
 ```
@@ -58,3 +58,5 @@ repositories:
     repository-a: 559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd
     repository-b: df7e70e5021544f4834bbee64a9e3789febc4be81470df629cad6ddb03320a5c
 ```
+
+A `README.md` file is generated for each workflow file that links to that file on GitHub for easy reference.

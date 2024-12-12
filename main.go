@@ -269,7 +269,7 @@ func initializeDB(dbPath string) error {
 	}
 
 	// Initialize actions directory
-	actionsPath := filepath.Join(dbPath, "actions")
+	actionsPath := filepath.Join(dbPath, "workflows")
 	if _, err := os.Stat(actionsPath); os.IsNotExist(err) {
 		fmt.Printf("Creating 'actions' directory at '%s'\n", actionsPath)
 		err = os.MkdirAll(actionsPath, os.ModePerm)
@@ -323,7 +323,7 @@ func updateRepositoriesManifest(dbPath string, repoName string) error {
 
 // updateActionIndex maps a repository to a workflow file hash in the action's index.
 func updateActionIndex(dbPath, actionName, repoName, hash string) error {
-	actionPath := filepath.Join(dbPath, "actions", actionName)
+	actionPath := filepath.Join(dbPath, "workflows", actionName)
 	if err := os.MkdirAll(actionPath, os.ModePerm); err != nil {
 		return err
 	}
@@ -374,12 +374,12 @@ func updateActionIndex(dbPath, actionName, repoName, hash string) error {
 
 // storeActionVersion saves the workflow file content under its hash.
 func storeActionVersion(dbPath, actionName, hash, content string) error {
-	actionPath := filepath.Join(dbPath, "actions", actionName)
+	actionPath := filepath.Join(dbPath, "workflows", actionName)
 	if err := os.MkdirAll(actionPath, os.ModePerm); err != nil {
 		return err
 	}
 
-	filePath := filepath.Join(actionPath, fmt.Sprintf("%s.yaml", hash))
+	filePath := filepath.Join(actionPath, fmt.Sprintf("%s", hash))
 	// Check if file already exists to avoid unnecessary writes
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		fmt.Printf("Storing workflow file '%s' under hash '%s'\n", actionName, hash)
@@ -396,9 +396,9 @@ func storeActionVersion(dbPath, actionName, hash, content string) error {
 
 // garbageCollect removes unused workflow file versions from the database.
 func garbageCollect(dbPath string) error {
-	actionsPath := filepath.Join(dbPath, "actions")
+	actionsPath := filepath.Join(dbPath, "workflows")
 	if _, err := os.Stat(actionsPath); os.IsNotExist(err) {
-		fmt.Printf("No 'actions' directory found at '%s'. Skipping garbage collection.\n", actionsPath)
+		fmt.Printf("No 'workflows' directory found at '%s'. Skipping garbage collection.\n", actionsPath)
 		return nil
 	}
 
@@ -519,7 +519,6 @@ func auditGitHubActions(org, token, dbPath string, includePub, includePrv bool) 
 
 		for _, wf := range workflows {
 			actionName := filepath.Base(wf.FilePath)
-			actionName = strings.TrimSuffix(actionName, filepath.Ext(actionName)) // Remove extension
 
 			// Update action index
 			if err := updateActionIndex(dbPath, actionName, wf.RepoName, wf.Hash); err != nil {
@@ -543,6 +542,69 @@ func auditGitHubActions(org, token, dbPath string, includePub, includePrv bool) 
 	// Perform garbage collection
 	if err := garbageCollect(dbPath); err != nil {
 		fmt.Printf("Error during garbage collection: %v\n", err)
+	}
+
+	// Generate README.md files
+	if err := generateReadmeFiles(dbPath, org); err != nil {
+		fmt.Printf("Error generating README.md files: %v\n", err)
+	}
+
+	return nil
+}
+
+// generateReadmeFiles creates README.md files in each action directory with links to workflow files.
+func generateReadmeFiles(dbPath, org string) error {
+	actionsPath := filepath.Join(dbPath, "workflows")
+	dirs, err := os.ReadDir(actionsPath)
+	if err != nil {
+		return fmt.Errorf("failed to read actions directory: %v", err)
+	}
+
+	for _, dir := range dirs {
+		if dir.IsDir() {
+			actionName := dir.Name()
+			indexPath := filepath.Join(actionsPath, actionName, "index.yaml")
+			var index ActionIndex
+
+			data, err := os.ReadFile(indexPath)
+			if err != nil {
+				fmt.Printf("Skipping action '%s' due to missing index.yaml.\n", actionName)
+				continue
+			}
+
+			err = yaml.Unmarshal(data, &index)
+			if err != nil {
+				fmt.Printf("Error parsing index.yaml for action '%s': %v\n", actionName, err)
+				continue
+			}
+
+			// Reverse mapping from hash to repositories
+			hashToRepos := make(map[string][]string)
+			for repo, hash := range index.Repositories {
+				hashToRepos[hash] = append(hashToRepos[hash], repo)
+			}
+
+			var markdownBuilder strings.Builder
+			markdownBuilder.WriteString(fmt.Sprintf("# %s\n\n", actionName))
+			for hash, repos := range hashToRepos {
+				markdownBuilder.WriteString(fmt.Sprintf("## [%s](%s)\n\n", hash, hash))
+				for _, repo := range repos {
+					filePath := ".github/workflows/" + actionName
+					url := fmt.Sprintf("https://github.com/%s/%s/blob/main/%s", org, repo, filePath)
+					markdownBuilder.WriteString(fmt.Sprintf("- [%s](%s)\n", repo, url))
+				}
+				markdownBuilder.WriteString("\n")
+			}
+
+			readmePath := filepath.Join(actionsPath, actionName, "README.md")
+			err = os.WriteFile(readmePath, []byte(markdownBuilder.String()), 0644)
+			if err != nil {
+				fmt.Printf("Error writing README.md for action '%s': %v\n", actionName, err)
+				continue
+			}
+
+			fmt.Printf("Generated README.md for action '%s'\n", actionName)
+		}
 	}
 
 	return nil
