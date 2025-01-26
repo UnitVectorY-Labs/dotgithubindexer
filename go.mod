@@ -1,4 +1,4 @@
-module dotgithubindexer
+module github.com/UnitVectorY-Labs/dotgithubindexer
 
 go 1.23.5
 
