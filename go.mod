@@ -1,6 +1,6 @@
 module github.com/UnitVectorY-Labs/dotgithubindexer
 
-go 1.23.5
+go 1.23.6
 
 require (
 	github.com/google/go-github/v50 v50.2.0
