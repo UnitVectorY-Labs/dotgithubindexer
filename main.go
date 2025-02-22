@@ -584,9 +584,19 @@ func generateReadmeFiles(dbPath, org string) error {
 				hashToRepos[hash] = append(hashToRepos[hash], repo)
 			}
 
+			// Sort hash keys alphabetically
+			var hashes []string
+			for hash := range hashToRepos {
+				hashes = append(hashes, hash)
+			}
+			sort.Strings(hashes)
+
 			var markdownBuilder strings.Builder
 			markdownBuilder.WriteString(fmt.Sprintf("# %s\n\n", actionName))
-			for hash, repos := range hashToRepos {
+			for _, hash := range hashes {
+				repos := hashToRepos[hash]
+				// Sort repository names alphabetically
+				sort.Strings(repos)
 				markdownBuilder.WriteString(fmt.Sprintf("## [%s](%s)\n\n", hash, hash))
 				for _, repo := range repos {
 					filePath := ".github/workflows/" + actionName
