@@ -53,6 +53,8 @@ var (
 	dbPath     string
 )
 
+var Version = "dev" // This will be set by the build systems to the release version
+
 // ------------------------
 // Section: Main Function and CLI Setup
 // ------------------------
@@ -66,7 +68,14 @@ func main() {
 	flag.StringVar(&token, "token", "", "GitHub API token (required)")
 	flag.StringVar(&dbPath, "db", "./db", "Path to the database repository")
 
+	showVersion := flag.Bool("version", false, "Print version")
+
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("Version:", Version)
+		return
+	}
 
 	// Check required flags
 	if org == "" || token == "" {
