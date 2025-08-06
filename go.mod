@@ -1,6 +1,6 @@
 module github.com/UnitVectorY-Labs/dotgithubindexer
 
-go 1.24.5 // GOVERSION
+go 1.24.6 // GOVERSION
 
 require (
 	github.com/google/go-github/v50 v50.2.0
