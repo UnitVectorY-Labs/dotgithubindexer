@@ -709,8 +709,8 @@ func generateDBSummary(dbPath string) error {
 		markdownBuilder.WriteString("| *No workflows found* | - | - |\n")
 	} else {
 		for _, summary := range summaries {
-			markdownBuilder.WriteString(fmt.Sprintf("| %s | %d | %d |\n",
-				summary.Name, summary.UniqueVersions, summary.TotalUses))
+			markdownBuilder.WriteString(fmt.Sprintf("| [%s](workflows/%s/README.md) | %d | %d |\n",
+				summary.Name, summary.Name, summary.UniqueVersions, summary.TotalUses))
 		}
 	}
 
