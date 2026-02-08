@@ -557,7 +557,7 @@ func storeDependabotVersion(dbPath, category, hash, content string) error {
 		return err
 	}
 
-	filePath := filepath.Join(categoryPath, fmt.Sprintf("%s", hash))
+	filePath := filepath.Join(categoryPath, hash)
 	// Check if file already exists to avoid unnecessary writes
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		fmt.Printf("Storing dependabot file under category '%s' with hash '%s'\n", category, hash)
@@ -679,7 +679,7 @@ func garbageCollectDependabot(dbPath string) error {
 				if file.IsDir() || file.Name() == "index.yaml" {
 					continue
 				}
-				hash := strings.TrimSuffix(file.Name(), filepath.Ext(file.Name()))
+				hash := file.Name()
 				if !hashesInUse[hash] {
 					fmt.Printf("Removing unused dependabot file '%s' from category '%s'\n", file.Name(), categoryName)
 					os.Remove(filepath.Join(categoryDirPath, file.Name()))
