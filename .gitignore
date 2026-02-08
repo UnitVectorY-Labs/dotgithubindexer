@@ -3,6 +3,9 @@
 
 db/
 
+# Application binary
+dotgithubindexer
+
 ### Eclipse ###
 .metadata
 bin/
