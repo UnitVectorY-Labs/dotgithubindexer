@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime/debug"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -68,6 +69,14 @@ var Version = "dev" // This will be set by the build systems to the release vers
 // ------------------------
 
 func main() {
+	// Set the build version from the build info if not set by the build system
+	if Version == "dev" || Version == "" {
+		if bi, ok := debug.ReadBuildInfo(); ok {
+			if bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+				Version = bi.Main.Version
+			}
+		}
+	}
 
 	// Define CLI flags using the flag package
 	flag.StringVar(&org, "org", "", "GitHub Organization name (required)")
