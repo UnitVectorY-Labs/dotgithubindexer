@@ -167,6 +167,11 @@ func fetchRepositories(client *github.Client, org string, includePub, includePrv
 		}
 
 		for _, repo := range repos {
+			// Skip archived repositories
+			if repo.GetArchived() {
+				continue
+			}
+
 			visibility := repo.GetVisibility()
 
 			if includePub && visibility == "public" {
