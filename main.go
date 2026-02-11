@@ -421,12 +421,17 @@ func parseUsesString(usesStr string, workflowContent string) (action string, ver
 		trimmedLine := strings.TrimSpace(line)
 		// Check if this line contains our uses statement
 		if strings.Contains(trimmedLine, "uses:") && strings.Contains(trimmedLine, usesStr) {
-			// Check if there's a comment
-			if commentIdx := strings.Index(trimmedLine, "#"); commentIdx != -1 {
-				// Extract the comment part (after the #)
-				comment := strings.TrimSpace(trimmedLine[commentIdx+1:])
-				if comment != "" {
-					version = version + " # " + comment
+			// Check if there's a comment after the uses statement
+			// Find the position after the version part to look for a comment
+			usesEndIdx := strings.Index(trimmedLine, usesStr) + len(usesStr)
+			if usesEndIdx < len(trimmedLine) {
+				remainingLine := trimmedLine[usesEndIdx:]
+				if commentIdx := strings.Index(remainingLine, "#"); commentIdx != -1 {
+					// Extract the comment part (after the #)
+					comment := strings.TrimSpace(remainingLine[commentIdx+1:])
+					if comment != "" {
+						version = version + " # " + comment
+					}
 				}
 			}
 			break
