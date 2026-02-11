@@ -50,6 +50,25 @@ type DependabotFile struct {
 	Category string
 }
 
+// ActionUse represents a single use of a GitHub action.
+type ActionUse struct {
+	Action   string // e.g., "actions/checkout"
+	Version  string // e.g., "de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2" or "v6.0.2"
+	RepoName string
+	FilePath string
+}
+
+// ActionUsesIndex tracks all uses of actions across workflows.
+type ActionUsesIndex struct {
+	Actions map[string]map[string][]WorkflowReference // Action -> Version -> []WorkflowReference
+}
+
+// WorkflowReference represents a reference to a workflow file that uses an action.
+type WorkflowReference struct {
+	RepoName string
+	FilePath string
+}
+
 // ------------------------
 // Section: Global Variables
 // ------------------------
@@ -322,6 +341,99 @@ func getDefaultBranch(repo *github.Repository) string {
 func computeHash(content []byte) string {
 	hash := sha256.Sum256(content)
 	return hex.EncodeToString(hash[:])
+}
+
+// extractActionUses parses a workflow YAML file and extracts all 'uses' statements.
+func extractActionUses(workflowContent string, repoName string, filePath string) []ActionUse {
+	var uses []ActionUse
+	
+	// Parse the YAML content
+	var workflow map[string]interface{}
+	err := yaml.Unmarshal([]byte(workflowContent), &workflow)
+	if err != nil {
+		fmt.Printf("Error parsing YAML for %s/%s: %v\n", repoName, filePath, err)
+		return uses
+	}
+	
+	// Navigate through jobs
+	jobs, ok := workflow["jobs"].(map[string]interface{})
+	if !ok {
+		return uses
+	}
+	
+	// Iterate through each job
+	for _, jobData := range jobs {
+		job, ok := jobData.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		
+		// Get steps from the job
+		steps, ok := job["steps"].([]interface{})
+		if !ok {
+			continue
+		}
+		
+		// Iterate through each step
+		for _, stepData := range steps {
+			step, ok := stepData.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			
+			// Check if step has a 'uses' field
+			if usesVal, ok := step["uses"]; ok {
+				if usesStr, ok := usesVal.(string); ok {
+					// Parse the uses string to extract action and version
+					action, version := parseUsesString(usesStr, workflowContent)
+					if action != "" {
+						uses = append(uses, ActionUse{
+							Action:   action,
+							Version:  version,
+							RepoName: repoName,
+							FilePath: filePath,
+						})
+					}
+				}
+			}
+		}
+	}
+	
+	return uses
+}
+
+// parseUsesString parses a 'uses' string to extract the action name and version.
+// It also looks for inline comments to include them in the version string.
+func parseUsesString(usesStr string, workflowContent string) (action string, version string) {
+	// Split by '@' to separate action from version
+	parts := strings.SplitN(usesStr, "@", 2)
+	if len(parts) != 2 {
+		// No version specified
+		return parts[0], ""
+	}
+	
+	action = parts[0]
+	version = parts[1]
+	
+	// Look for the uses line in the original content to get any inline comment
+	lines := strings.Split(workflowContent, "\n")
+	for _, line := range lines {
+		trimmedLine := strings.TrimSpace(line)
+		// Check if this line contains our uses statement
+		if strings.Contains(trimmedLine, "uses:") && strings.Contains(trimmedLine, usesStr) {
+			// Check if there's a comment
+			if commentIdx := strings.Index(trimmedLine, "#"); commentIdx != -1 {
+				// Extract the comment part (after the #)
+				comment := strings.TrimSpace(trimmedLine[commentIdx+1:])
+				if comment != "" {
+					version = version + " # " + comment
+				}
+			}
+			break
+		}
+	}
+	
+	return action, version
 }
 
 // extractCategory extracts the category from a file content based on the comment format.
@@ -736,6 +848,11 @@ func auditGitHubActions(org, token, dbPath string, includePub, includePrv bool) 
 		return fmt.Errorf("failed to initialize database: %v", err)
 	}
 
+	// Initialize action uses index
+	usesIndex := &ActionUsesIndex{
+		Actions: make(map[string]map[string][]WorkflowReference),
+	}
+
 	// Fetch Repositories
 	repos, err := fetchRepositories(client, org, includePub, includePrv)
 	if err != nil {
@@ -777,6 +894,22 @@ func auditGitHubActions(org, token, dbPath string, includePub, includePrv bool) 
 			if err := storeActionVersion(dbPath, actionName, wf.Hash, wf.Content); err != nil {
 				fmt.Printf("Error storing action version for %s in %s: %v\n", actionName, repoName, err)
 				continue
+			}
+
+			// Extract action uses from workflow content
+			uses := extractActionUses(wf.Content, wf.RepoName, wf.FilePath)
+			for _, use := range uses {
+				// Add to uses index
+				if _, ok := usesIndex.Actions[use.Action]; !ok {
+					usesIndex.Actions[use.Action] = make(map[string][]WorkflowReference)
+				}
+				usesIndex.Actions[use.Action][use.Version] = append(
+					usesIndex.Actions[use.Action][use.Version],
+					WorkflowReference{
+						RepoName: use.RepoName,
+						FilePath: use.FilePath,
+					},
+				)
 			}
 		}
 
@@ -828,6 +961,11 @@ func auditGitHubActions(org, token, dbPath string, includePub, includePrv bool) 
 	// Generate summary README.md in db folder
 	if err := generateDBSummary(dbPath); err != nil {
 		fmt.Printf("Error generating DB summary README.md: %v\n", err)
+	}
+
+	// Generate USES.md file
+	if err := generateUSESMarkdown(dbPath, org, usesIndex); err != nil {
+		fmt.Printf("Error generating USES.md: %v\n", err)
 	}
 
 	return nil
@@ -1135,5 +1273,102 @@ func generateDBSummary(dbPath string) error {
 	}
 
 	fmt.Printf("Generated DB summary README.md with %d workflows and %d dependabot categories\n", len(summaries), len(dependabotSummaries))
+	return nil
+}
+
+// generateUSESMarkdown creates a USES.md file in the db folder that indexes all action uses.
+func generateUSESMarkdown(dbPath, org string, usesIndex *ActionUsesIndex) error {
+	if usesIndex == nil || len(usesIndex.Actions) == 0 {
+		fmt.Printf("No action uses found. Skipping USES.md generation.\n")
+		return nil
+	}
+	
+	var markdownBuilder strings.Builder
+	markdownBuilder.WriteString("# GitHub Actions Uses\n\n")
+	markdownBuilder.WriteString("This document provides an index of all GitHub Actions used across workflows in the organization.\n\n")
+	markdownBuilder.WriteString("**Legend:**\n")
+	markdownBuilder.WriteString("- **Action**: The GitHub Action being used (e.g., `actions/checkout`)\n")
+	markdownBuilder.WriteString("- **Version**: The specific version of the action, including any inline comments\n")
+	markdownBuilder.WriteString("- **Usage Count**: The number of workflow files using this specific version\n\n")
+	
+	// Sort actions alphabetically
+	var actionNames []string
+	for actionName := range usesIndex.Actions {
+		actionNames = append(actionNames, actionName)
+	}
+	sort.Strings(actionNames)
+	
+	// For each action, list versions and their usage
+	for _, actionName := range actionNames {
+		versions := usesIndex.Actions[actionName]
+		
+		// Sort versions alphabetically
+		var versionKeys []string
+		for version := range versions {
+			versionKeys = append(versionKeys, version)
+		}
+		sort.Strings(versionKeys)
+		
+		// Calculate total usage count for this action
+		totalUsage := 0
+		for _, refs := range versions {
+			totalUsage += len(refs)
+		}
+		
+		markdownBuilder.WriteString(fmt.Sprintf("## %s\n\n", actionName))
+		markdownBuilder.WriteString(fmt.Sprintf("**Total Usage**: %d workflow file(s) across %d version(s)\n\n", totalUsage, len(versions)))
+		
+		// For each version, create a collapsible section
+		for _, version := range versionKeys {
+			refs := versions[version]
+			
+			// Sort references by repo name and file path
+			sort.Slice(refs, func(i, j int) bool {
+				if refs[i].RepoName == refs[j].RepoName {
+					return refs[i].FilePath < refs[j].FilePath
+				}
+				return refs[i].RepoName < refs[j].RepoName
+			})
+			
+			usageCount := len(refs)
+			
+			// Display version with usage count
+			versionDisplay := version
+			if versionDisplay == "" {
+				versionDisplay = "(no version specified)"
+			}
+			
+			markdownBuilder.WriteString(fmt.Sprintf("### Version: `%s`\n\n", versionDisplay))
+			markdownBuilder.WriteString(fmt.Sprintf("**Usage Count**: %d\n\n", usageCount))
+			
+			// Create collapsible section for workflow files
+			// To minimize noise, we'll show up to 10 files directly, and collapse the rest
+			const maxDirectShow = 10
+			
+			markdownBuilder.WriteString("<details>\n")
+			markdownBuilder.WriteString(fmt.Sprintf("<summary>Show %d workflow file(s) using this version</summary>\n\n", usageCount))
+			
+			// Show all refs in the collapsible section
+			for _, ref := range refs {
+				url := fmt.Sprintf("https://github.com/%s/%s/blob/main/%s", org, ref.RepoName, ref.FilePath)
+				markdownBuilder.WriteString(fmt.Sprintf("- [%s: %s](%s)\n", ref.RepoName, ref.FilePath, url))
+			}
+			
+			markdownBuilder.WriteString("\n</details>\n\n")
+		}
+		
+		markdownBuilder.WriteString("\n")
+	}
+	
+	markdownBuilder.WriteString("\n*This file is automatically generated after each data collection run.*\n")
+	
+	// Write to USES.md in db folder
+	usesPath := filepath.Join(dbPath, "USES.md")
+	err := os.WriteFile(usesPath, []byte(markdownBuilder.String()), 0644)
+	if err != nil {
+		return fmt.Errorf("error writing USES.md: %v", err)
+	}
+	
+	fmt.Printf("Generated USES.md with %d actions\n", len(actionNames))
 	return nil
 }
