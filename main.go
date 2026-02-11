@@ -1325,6 +1325,7 @@ func generateUSESMarkdown(dbPath, org string, usesIndex *ActionUsesIndex) error 
 			totalUsage += len(refs)
 		}
 		
+		markdownBuilder.WriteString("---\n\n")
 		markdownBuilder.WriteString(fmt.Sprintf("## %s\n\n", actionName))
 		markdownBuilder.WriteString(fmt.Sprintf("**Total Usage**: %d workflow file(s) across %d version(s)\n\n", totalUsage, len(versions)))
 		
