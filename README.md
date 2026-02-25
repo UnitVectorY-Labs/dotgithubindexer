@@ -26,6 +26,10 @@ Usage: dotgithubindexer -org <organization> -token <token> [options]
     	GitHub API token (required)
 ```
 
+## Archived Repositories
+
+Archived repositories are automatically excluded from indexing because they cannot be modified. When fetching repositories from the GitHub API, archived repositories are filtered out and will not be indexed.
+
 ## Folder Structure
 
 This application does not utilize a database, instead the content is output to text files and is intended to be committed to a git repository. The folder structure is as follows:
