@@ -50,6 +50,15 @@ type DependabotFile struct {
 	Category string
 }
 
+// RootFile represents a dot file found in the root of a repository.
+type RootFile struct {
+	RepoName string
+	FileName string
+	Content  string
+	Hash     string
+	Category string
+}
+
 // ActionUse represents a single use of a GitHub action.
 type ActionUse struct {
 	Action   string // e.g., "actions/checkout"
@@ -74,11 +83,12 @@ type WorkflowReference struct {
 // ------------------------
 
 var (
-	org        string
-	includePub bool
-	includePrv bool
-	token      string
-	dbPath     string
+	org           string
+	includePub    bool
+	includePrv    bool
+	token         string
+	dbPath        string
+	rootFilesList string
 )
 
 var Version = "dev" // This will be set by the build systems to the release version
@@ -103,6 +113,7 @@ func main() {
 	flag.BoolVar(&includePrv, "private", false, "Include private repositories; boolean")
 	flag.StringVar(&token, "token", "", "GitHub API token (required)")
 	flag.StringVar(&dbPath, "db", "./db", "Path to the database repository")
+	flag.StringVar(&rootFilesList, "rootfiles", "", "Comma-separated list of root dot files to index (e.g., .editorconfig,.prettierrc.json)")
 
 	showVersion := flag.Bool("version", false, "Print version")
 
@@ -120,11 +131,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Parse root files list
+	var rootFiles []string
+	if rootFilesList != "" {
+		for _, f := range strings.Split(rootFilesList, ",") {
+			trimmed := strings.TrimSpace(f)
+			if trimmed != "" {
+				rootFiles = append(rootFiles, trimmed)
+			}
+		}
+	}
+
 	// Execute main audit logic
 	startTime := time.Now()
 	fmt.Println("Starting GitHub Actions Audit")
 
-	err := auditGitHubActions(org, token, dbPath, includePub, includePrv)
+	err := auditGitHubActions(org, token, dbPath, includePub, includePrv, rootFiles)
 	if err != nil {
 		fmt.Printf("Audit failed: %v\n", err)
 		os.Exit(1)
@@ -334,6 +356,67 @@ func fetchDependabotFile(client *github.Client, repo *github.Repository) (*Depen
 	}, nil
 }
 
+// fetchRootFile retrieves a specific file from the root of a repository if it exists.
+func fetchRootFile(client *github.Client, repo *github.Repository, fileName string) (*RootFile, error) {
+	ctx := context.Background()
+	defaultBranch := getDefaultBranch(repo)
+
+	// Try to fetch the file from the root of the repository
+	fileContent, _, _, err := client.Repositories.GetContents(ctx, repo.GetOwner().GetLogin(), repo.GetName(), fileName, &github.RepositoryContentGetOptions{
+		Ref: defaultBranch,
+	})
+
+	if err != nil {
+		// If file is not found, return nil without error
+		if _, ok := err.(*github.ErrorResponse); ok && strings.Contains(err.Error(), "404") {
+			fmt.Printf("No '%s' file found in repository '%s'.\n", fileName, repo.GetName())
+			return nil, nil
+		}
+		fmt.Printf("Error accessing %s in repository '%s': %v\n", fileName, repo.GetName(), err)
+		return nil, err
+	}
+
+	if fileContent == nil {
+		fmt.Printf("No %s file found in repository '%s'.\n", fileName, repo.GetName())
+		return nil, nil
+	}
+
+	fmt.Printf("Found %s file in repository '%s'\n", fileName, repo.GetName())
+
+	// Fetch the blob to get the content
+	blob, _, err := client.Git.GetBlob(ctx, repo.GetOwner().GetLogin(), repo.GetName(), fileContent.GetSHA())
+	if err != nil {
+		fmt.Printf("Error fetching blob for %s in repository '%s': %v\n", fileName, repo.GetName(), err)
+		return nil, err
+	}
+
+	// Decode the content from base64
+	contentBytes, err := base64.StdEncoding.DecodeString(blob.GetContent())
+	if err != nil {
+		fmt.Printf("Error decoding content for %s in repository '%s': %v\n", fileName, repo.GetName(), err)
+		return nil, err
+	}
+	content := string(contentBytes)
+
+	if content == "" {
+		fmt.Printf("Empty content for %s in repository '%s'\n", fileName, repo.GetName())
+		return nil, nil
+	}
+
+	hash := computeHash([]byte(content))
+	category := extractCategory(content)
+
+	fmt.Printf("Hashing %s in repository '%s': %s (category: %s)\n", fileName, repo.GetName(), hash, category)
+
+	return &RootFile{
+		RepoName: repo.GetName(),
+		FileName: fileName,
+		Content:  content,
+		Hash:     hash,
+		Category: category,
+	}, nil
+}
+
 // getDefaultBranch retrieves the default branch of a repository.
 func getDefaultBranch(repo *github.Repository) string {
 	if repo.GetDefaultBranch() != "" {
@@ -520,6 +603,18 @@ func initializeDB(dbPath string) error {
 		fmt.Printf("'dependabot' directory already exists at '%s'\n", dependabotPath)
 	}
 
+	// Initialize rootfiles directory
+	rootFilesPath := filepath.Join(dbPath, "rootfiles")
+	if _, err := os.Stat(rootFilesPath); os.IsNotExist(err) {
+		fmt.Printf("Creating 'rootfiles' directory at '%s'\n", rootFilesPath)
+		err = os.MkdirAll(rootFilesPath, os.ModePerm)
+		if err != nil {
+			return err
+		}
+	} else {
+		fmt.Printf("'rootfiles' directory already exists at '%s'\n", rootFilesPath)
+	}
+
 	return nil
 }
 
@@ -699,6 +794,75 @@ func storeDependabotVersion(dbPath, category, hash, content string) error {
 	return nil
 }
 
+// updateRootFileIndex maps a repository to a root file hash and category in the root file index.
+func updateRootFileIndex(dbPath, fileName, repoName, hash, category string) error {
+	categoryPath := filepath.Join(dbPath, "rootfiles", fileName, category)
+	if err := os.MkdirAll(categoryPath, os.ModePerm); err != nil {
+		return err
+	}
+
+	indexPath := filepath.Join(categoryPath, "index.yaml")
+	var index ActionIndex
+
+	if _, err := os.Stat(indexPath); err == nil {
+		data, err := os.ReadFile(indexPath)
+		if err != nil {
+			return err
+		}
+		err = yaml.Unmarshal(data, &index)
+		if err != nil {
+			return err
+		}
+	} else {
+		index = ActionIndex{Repositories: make(map[string]string)}
+	}
+
+	index.Repositories[repoName] = hash
+
+	// Sort repositories alphabetically by key
+	sortedKeys := make([]string, 0, len(index.Repositories))
+	for k := range index.Repositories {
+		sortedKeys = append(sortedKeys, k)
+	}
+	sort.Strings(sortedKeys)
+
+	sortedRepositories := make(map[string]string)
+	for _, k := range sortedKeys {
+		sortedRepositories[k] = index.Repositories[k]
+	}
+	index.Repositories = sortedRepositories
+
+	updatedData, err := yaml.Marshal(&index)
+	if err != nil {
+		return err
+	}
+	err = os.WriteFile(indexPath, updatedData, 0644)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Updated root file index for '%s' category '%s' with repository '%s'\n", fileName, category, repoName)
+	return nil
+}
+
+// storeRootFileVersion saves the root file content under its hash.
+func storeRootFileVersion(dbPath, fileName, category, hash, content string) error {
+	categoryPath := filepath.Join(dbPath, "rootfiles", fileName, category)
+	if err := os.MkdirAll(categoryPath, os.ModePerm); err != nil {
+		return err
+	}
+
+	filePath := filepath.Join(categoryPath, hash)
+	// Check if file already exists to avoid unnecessary writes
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		fmt.Printf("Storing root file '%s' under category '%s' with hash '%s'\n", fileName, category, hash)
+		return os.WriteFile(filePath, []byte(content), 0644)
+	}
+
+	fmt.Printf("Root file '%s' with hash '%s' already exists. Skipping write.\n", fileName, hash)
+	return nil
+}
+
 // ------------------------
 // Section: Garbage Collection
 // ------------------------
@@ -823,6 +987,81 @@ func garbageCollectDependabot(dbPath string) error {
 	return nil
 }
 
+// garbageCollectRootFiles removes unused root file versions from the database.
+func garbageCollectRootFiles(dbPath string) error {
+	rootFilesPath := filepath.Join(dbPath, "rootfiles")
+	if _, err := os.Stat(rootFilesPath); os.IsNotExist(err) {
+		fmt.Printf("No 'rootfiles' directory found at '%s'. Skipping garbage collection.\n", rootFilesPath)
+		return nil
+	}
+
+	fileDirs, err := os.ReadDir(rootFilesPath)
+	if err != nil {
+		return err
+	}
+
+	for _, fileDir := range fileDirs {
+		if !fileDir.IsDir() {
+			continue
+		}
+		fileName := fileDir.Name()
+		fileDirPath := filepath.Join(rootFilesPath, fileName)
+
+		categoryDirs, err := os.ReadDir(fileDirPath)
+		if err != nil {
+			fmt.Printf("Error reading root file directory '%s': %v\n", fileDirPath, err)
+			continue
+		}
+
+		for _, categoryDir := range categoryDirs {
+			if !categoryDir.IsDir() {
+				continue
+			}
+			categoryName := categoryDir.Name()
+			indexPath := filepath.Join(fileDirPath, categoryName, "index.yaml")
+			var index ActionIndex
+			data, err := os.ReadFile(indexPath)
+			if err != nil {
+				fmt.Printf("No index found for root file '%s' category '%s'. Skipping.\n", fileName, categoryName)
+				continue
+			}
+			err = yaml.Unmarshal(data, &index)
+			if err != nil {
+				fmt.Printf("Error unmarshaling index for root file '%s' category '%s': %v\n", fileName, categoryName, err)
+				continue
+			}
+
+			// Collect all hashes in use
+			hashesInUse := make(map[string]bool)
+			for _, hash := range index.Repositories {
+				hashesInUse[hash] = true
+			}
+
+			// Iterate over all files in category directory
+			categoryDirPath := filepath.Join(fileDirPath, categoryName)
+			files, err := os.ReadDir(categoryDirPath)
+			if err != nil {
+				fmt.Printf("Error reading root file category directory '%s': %v\n", categoryDirPath, err)
+				continue
+			}
+
+			for _, file := range files {
+				if file.IsDir() || file.Name() == "index.yaml" {
+					continue
+				}
+				hash := file.Name()
+				if !hashesInUse[hash] {
+					fmt.Printf("Removing unused root file '%s' from '%s' category '%s'\n", file.Name(), fileName, categoryName)
+					os.Remove(filepath.Join(categoryDirPath, file.Name()))
+				}
+			}
+		}
+	}
+
+	fmt.Println("Root files garbage collection completed.")
+	return nil
+}
+
 // ------------------------
 // Section: Rate Limiting
 // ------------------------
@@ -850,7 +1089,7 @@ func checkRateLimit(client *github.Client) error {
 // ------------------------
 
 // auditGitHubActions orchestrates the entire audit process.
-func auditGitHubActions(org, token, dbPath string, includePub, includePrv bool) error {
+func auditGitHubActions(org, token, dbPath string, includePub, includePrv bool, rootFiles []string) error {
 	client := getGitHubClient(token)
 
 	// Initialize DB
@@ -942,6 +1181,27 @@ func auditGitHubActions(org, token, dbPath string, includePub, includePrv bool) 
 			}
 		}
 
+		// Fetch root files
+		for _, rootFileName := range rootFiles {
+			rootFile, err := fetchRootFile(client, repo, rootFileName)
+			if err != nil {
+				fmt.Printf("Error fetching root file '%s' for %s: %v\n", rootFileName, repoName, err)
+				continue
+			}
+
+			if rootFile != nil {
+				// Update root file index
+				if err := updateRootFileIndex(dbPath, rootFile.FileName, rootFile.RepoName, rootFile.Hash, rootFile.Category); err != nil {
+					fmt.Printf("Error updating root file index for '%s' in %s: %v\n", rootFile.FileName, repoName, err)
+				}
+
+				// Store root file version
+				if err := storeRootFileVersion(dbPath, rootFile.FileName, rootFile.Category, rootFile.Hash, rootFile.Content); err != nil {
+					fmt.Printf("Error storing root file version for '%s' in %s: %v\n", rootFile.FileName, repoName, err)
+				}
+			}
+		}
+
 		// Handle rate limiting after processing each repository
 		if err := checkRateLimit(client); err != nil {
 			return fmt.Errorf("rate limit check failed: %v", err)
@@ -958,6 +1218,11 @@ func auditGitHubActions(org, token, dbPath string, includePub, includePrv bool) 
 		fmt.Printf("Error during dependabot garbage collection: %v\n", err)
 	}
 
+	// Perform root files garbage collection
+	if err := garbageCollectRootFiles(dbPath); err != nil {
+		fmt.Printf("Error during root files garbage collection: %v\n", err)
+	}
+
 	// Generate README.md files
 	if err := generateReadmeFiles(dbPath, org); err != nil {
 		fmt.Printf("Error generating README.md files: %v\n", err)
@@ -966,6 +1231,11 @@ func auditGitHubActions(org, token, dbPath string, includePub, includePrv bool) 
 	// Generate README.md files for dependabot
 	if err := generateDependabotReadmeFiles(dbPath, org); err != nil {
 		fmt.Printf("Error generating dependabot README.md files: %v\n", err)
+	}
+
+	// Generate README.md files for root files
+	if err := generateRootFileReadmeFiles(dbPath, org); err != nil {
+		fmt.Printf("Error generating root file README.md files: %v\n", err)
 	}
 
 	// Generate summary README.md in db folder
@@ -1123,6 +1393,93 @@ func generateDependabotReadmeFiles(dbPath, org string) error {
 	return nil
 }
 
+// generateRootFileReadmeFiles creates README.md files in each root file category directory.
+func generateRootFileReadmeFiles(dbPath, org string) error {
+	rootFilesPath := filepath.Join(dbPath, "rootfiles")
+	if _, err := os.Stat(rootFilesPath); os.IsNotExist(err) {
+		fmt.Printf("No 'rootfiles' directory found at '%s'. Skipping README generation.\n", rootFilesPath)
+		return nil
+	}
+
+	fileDirs, err := os.ReadDir(rootFilesPath)
+	if err != nil {
+		return fmt.Errorf("failed to read rootfiles directory: %v", err)
+	}
+
+	for _, fileDir := range fileDirs {
+		if !fileDir.IsDir() {
+			continue
+		}
+		fileName := fileDir.Name()
+		fileDirPath := filepath.Join(rootFilesPath, fileName)
+
+		categoryDirs, err := os.ReadDir(fileDirPath)
+		if err != nil {
+			fmt.Printf("Error reading root file directory '%s': %v\n", fileDirPath, err)
+			continue
+		}
+
+		for _, categoryDir := range categoryDirs {
+			if !categoryDir.IsDir() {
+				continue
+			}
+			categoryName := categoryDir.Name()
+			indexPath := filepath.Join(fileDirPath, categoryName, "index.yaml")
+			var index ActionIndex
+
+			data, err := os.ReadFile(indexPath)
+			if err != nil {
+				fmt.Printf("Skipping root file '%s' category '%s' due to missing index.yaml.\n", fileName, categoryName)
+				continue
+			}
+
+			err = yaml.Unmarshal(data, &index)
+			if err != nil {
+				fmt.Printf("Error parsing index.yaml for root file '%s' category '%s': %v\n", fileName, categoryName, err)
+				continue
+			}
+
+			// Reverse mapping from hash to repositories
+			hashToRepos := make(map[string][]string)
+			for repo, hash := range index.Repositories {
+				hashToRepos[hash] = append(hashToRepos[hash], repo)
+			}
+
+			// Sort hash keys alphabetically
+			var hashes []string
+			for hash := range hashToRepos {
+				hashes = append(hashes, hash)
+			}
+			sort.Strings(hashes)
+
+			var markdownBuilder strings.Builder
+			markdownBuilder.WriteString(fmt.Sprintf("# %s - %s\n\n", fileName, categoryName))
+			for _, hash := range hashes {
+				repos := hashToRepos[hash]
+				// Sort repository names alphabetically
+				sort.Strings(repos)
+				markdownBuilder.WriteString(fmt.Sprintf("## [%s](%s)\n\n", hash, hash))
+				for _, repo := range repos {
+					url := fmt.Sprintf("https://github.com/%s/%s/blob/main/%s", org, repo, fileName)
+					markdownBuilder.WriteString(fmt.Sprintf("- [%s](%s)\n", repo, url))
+				}
+				markdownBuilder.WriteString("\n")
+			}
+
+			readmePath := filepath.Join(fileDirPath, categoryName, "README.md")
+			err = os.WriteFile(readmePath, []byte(markdownBuilder.String()), 0644)
+			if err != nil {
+				fmt.Printf("Error writing README.md for root file '%s' category '%s': %v\n", fileName, categoryName, err)
+				continue
+			}
+
+			fmt.Printf("Generated README.md for root file '%s' category '%s'\n", fileName, categoryName)
+		}
+	}
+
+	return nil
+}
+
 // generateDBSummary creates a summary README.md file in the db folder with workflow statistics.
 func generateDBSummary(dbPath string) error {
 	actionsPath := filepath.Join(dbPath, "workflows")
@@ -1270,6 +1627,93 @@ func generateDBSummary(dbPath string) error {
 		for _, summary := range dependabotSummaries {
 			markdownBuilder.WriteString(fmt.Sprintf("| [%s](dependabot/%s/README.md) | %d | %d |\n",
 				summary.Category, summary.Category, summary.UniqueVersions, summary.TotalUses))
+		}
+	}
+
+	// Get root files summaries
+	type RootFileSummary struct {
+		FileName       string
+		Category       string
+		UniqueVersions int
+		TotalUses      int
+	}
+
+	var rootFileSummaries []RootFileSummary
+	rootFilesPath := filepath.Join(dbPath, "rootfiles")
+	if _, err := os.Stat(rootFilesPath); err == nil {
+		rootFileDirs, err := os.ReadDir(rootFilesPath)
+		if err == nil {
+			for _, fileDir := range rootFileDirs {
+				if !fileDir.IsDir() {
+					continue
+				}
+				fileName := fileDir.Name()
+				fileDirPath := filepath.Join(rootFilesPath, fileName)
+
+				categoryDirs, err := os.ReadDir(fileDirPath)
+				if err != nil {
+					continue
+				}
+
+				for _, categoryDir := range categoryDirs {
+					if !categoryDir.IsDir() {
+						continue
+					}
+					categoryName := categoryDir.Name()
+					indexPath := filepath.Join(fileDirPath, categoryName, "index.yaml")
+
+					var index ActionIndex
+					data, err := os.ReadFile(indexPath)
+					if err != nil {
+						continue
+					}
+
+					err = yaml.Unmarshal(data, &index)
+					if err != nil {
+						continue
+					}
+
+					uniqueHashes := make(map[string]bool)
+					totalUses := len(index.Repositories)
+
+					for _, hash := range index.Repositories {
+						uniqueHashes[hash] = true
+					}
+
+					rootFileSummaries = append(rootFileSummaries, RootFileSummary{
+						FileName:       fileName,
+						Category:       categoryName,
+						UniqueVersions: len(uniqueHashes),
+						TotalUses:      totalUses,
+					})
+				}
+			}
+		}
+	}
+
+	// Sort root file summaries by file name then category
+	sort.Slice(rootFileSummaries, func(i, j int) bool {
+		if rootFileSummaries[i].FileName == rootFileSummaries[j].FileName {
+			return rootFileSummaries[i].Category < rootFileSummaries[j].Category
+		}
+		return rootFileSummaries[i].FileName < rootFileSummaries[j].FileName
+	})
+
+	// Add root files summary if there are any
+	if len(rootFileSummaries) > 0 {
+		markdownBuilder.WriteString("\n## Root Files Summary\n\n")
+		markdownBuilder.WriteString("This table provides a summary of root dot files found in the organization, grouped by file name and category.\n\n")
+		markdownBuilder.WriteString("**Legend:**\n")
+		markdownBuilder.WriteString("- **File Name**: The name of the root dot file\n")
+		markdownBuilder.WriteString("- **Category**: The category extracted from the `# dotgithubindexer: <category>` comment in the file\n")
+		markdownBuilder.WriteString("- **Unique Versions**: The number of unique content hashes representing different versions of the file\n")
+		markdownBuilder.WriteString("- **Total Uses**: The total number of repositories using this file configuration\n\n")
+		markdownBuilder.WriteString("| File Name | Category | Unique Versions | Total Uses |\n")
+		markdownBuilder.WriteString("|-----------|----------|-----------------|------------|\n")
+
+		for _, summary := range rootFileSummaries {
+			markdownBuilder.WriteString(fmt.Sprintf("| %s | [%s](rootfiles/%s/%s/README.md) | %d | %d |\n",
+				summary.FileName, summary.Category, summary.FileName, summary.Category, summary.UniqueVersions, summary.TotalUses))
 		}
 	}
 
