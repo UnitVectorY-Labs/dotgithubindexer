@@ -22,6 +22,8 @@ Usage: dotgithubindexer -org <organization> -token <token> [options]
     	Include private repositories; boolean
   -public
     	Include public repositories; boolean (default true)
+  -rootfiles string
+    	Comma-separated list of root dot files to index (e.g., .editorconfig,.prettierrc.json)
   -token string
     	GitHub API token (required)
 ```
