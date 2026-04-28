@@ -1,0 +1,13 @@
+name: dotgithubindexer
+default_branch: main
+config:
+  description: "A tool for indexing the different GitHub Actions workflows files across repositories within an organization."
+  license: MIT
+  language: go
+  release: release-go
+  justfile: true
+  codecov:
+    enabled: true
+  gitignore: [
+    "db/"
+  ]
