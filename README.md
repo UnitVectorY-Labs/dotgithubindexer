@@ -23,10 +23,21 @@ Usage: dotgithubindexer -org <organization> -token <token> [options]
   -public
     	Include public repositories; boolean (default true)
   -rootfiles string
-    	Comma-separated list of root dot files to index (e.g., .editorconfig,.prettierrc.json)
+    	Comma-separated list of root dot files to index (merged with db/dotfiles.yaml)
   -token string
     	GitHub API token (required)
 ```
+
+Root dot files can also be configured by committing a `dotfiles.yaml` file in the database directory:
+
+```yaml
+dotfiles:
+  - .gitignore
+  - .repver
+  - .clip4llm
+```
+
+When both `db/dotfiles.yaml` and `-rootfiles` are provided, the lists are merged.
 
 ## Archived Repositories
 

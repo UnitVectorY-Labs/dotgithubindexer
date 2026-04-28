@@ -40,7 +40,7 @@ updates:
 
 **Source path:** Repository root (configurable)
 
-Root files are dot files found in the root directory of repositories. Unlike workflow and dependabot files, root files are not indexed by default. You must specify which files to look for using the `-rootfiles` CLI flag.
+Root files are dot files found in the root directory of repositories. Unlike workflow and dependabot files, root files are not indexed by default. You can specify which files to look for using the `-rootfiles` CLI flag or `db/dotfiles.yaml`.
 
 Root files follow the same category-based grouping pattern as dependabot files. Adding a `# dotgithubindexer: <category>` comment to the file assigns it to a category. Files without this comment are placed in the `Default` category.
 

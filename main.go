@@ -8,8 +8,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"runtime/debug"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"time"
@@ -57,6 +57,11 @@ type RootFile struct {
 	Content  string
 	Hash     string
 	Category string
+}
+
+// DotfilesConfig represents the optional db/dotfiles.yaml configuration file.
+type DotfilesConfig struct {
+	Dotfiles []string `yaml:"dotfiles"`
 }
 
 // ActionUse represents a single use of a GitHub action.
@@ -131,22 +136,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Parse root files list
-	var rootFiles []string
-	if rootFilesList != "" {
-		for _, f := range strings.Split(rootFilesList, ",") {
-			trimmed := strings.TrimSpace(f)
-			if trimmed != "" {
-				rootFiles = append(rootFiles, trimmed)
-			}
-		}
+	rootFiles, err := resolveRootFiles(dbPath, rootFilesList)
+	if err != nil {
+		fmt.Printf("Failed to load dotfiles configuration: %v\n", err)
+		os.Exit(1)
 	}
 
 	// Execute main audit logic
 	startTime := time.Now()
 	fmt.Println("Starting GitHub Actions Audit")
 
-	err := auditGitHubActions(org, token, dbPath, includePub, includePrv, rootFiles)
+	err = auditGitHubActions(org, token, dbPath, includePub, includePrv, rootFiles)
 	if err != nil {
 		fmt.Printf("Audit failed: %v\n", err)
 		os.Exit(1)
@@ -300,12 +300,12 @@ func fetchWorkflowFiles(client *github.Client, repo *github.Repository) ([]Workf
 func fetchDependabotFile(client *github.Client, repo *github.Repository) (*DependabotFile, error) {
 	ctx := context.Background()
 	defaultBranch := getDefaultBranch(repo)
-	
+
 	// Try to fetch .github/dependabot.yml
 	fileContent, _, _, err := client.Repositories.GetContents(ctx, repo.GetOwner().GetLogin(), repo.GetName(), ".github/dependabot.yml", &github.RepositoryContentGetOptions{
 		Ref: defaultBranch,
 	})
-	
+
 	if err != nil {
 		// If file is not found, return nil without error
 		if _, ok := err.(*github.ErrorResponse); ok && strings.Contains(err.Error(), "404") {
@@ -315,21 +315,21 @@ func fetchDependabotFile(client *github.Client, repo *github.Repository) (*Depen
 		fmt.Printf("Error accessing .github/dependabot.yml in repository '%s': %v\n", repo.GetName(), err)
 		return nil, err
 	}
-	
+
 	if fileContent == nil {
 		fmt.Printf("No dependabot.yml file found in repository '%s'.\n", repo.GetName())
 		return nil, nil
 	}
-	
+
 	fmt.Printf("Found dependabot.yml file in repository '%s'\n", repo.GetName())
-	
+
 	// Fetch the blob to get the content
 	blob, _, err := client.Git.GetBlob(ctx, repo.GetOwner().GetLogin(), repo.GetName(), fileContent.GetSHA())
 	if err != nil {
 		fmt.Printf("Error fetching blob for dependabot.yml in repository '%s': %v\n", repo.GetName(), err)
 		return nil, err
 	}
-	
+
 	// Decode the content from base64
 	contentBytes, err := base64.StdEncoding.DecodeString(blob.GetContent())
 	if err != nil {
@@ -337,17 +337,17 @@ func fetchDependabotFile(client *github.Client, repo *github.Repository) (*Depen
 		return nil, err
 	}
 	content := string(contentBytes)
-	
+
 	if content == "" {
 		fmt.Printf("Empty content for dependabot.yml in repository '%s'\n", repo.GetName())
 		return nil, nil
 	}
-	
+
 	hash := computeHash([]byte(content))
 	category := extractCategory(content)
-	
+
 	fmt.Printf("Hashing dependabot.yml in repository '%s': %s (category: %s)\n", repo.GetName(), hash, category)
-	
+
 	return &DependabotFile{
 		RepoName: repo.GetName(),
 		Content:  content,
@@ -431,10 +431,65 @@ func computeHash(content []byte) string {
 	return hex.EncodeToString(hash[:])
 }
 
+// parseRootFilesList parses a comma-separated list of root files.
+func parseRootFilesList(rootFilesList string) []string {
+	var rootFiles []string
+	for _, f := range strings.Split(rootFilesList, ",") {
+		trimmed := strings.TrimSpace(f)
+		if trimmed != "" {
+			rootFiles = append(rootFiles, trimmed)
+		}
+	}
+	return rootFiles
+}
+
+// loadDotfilesConfig loads db/dotfiles.yaml if present.
+func loadDotfilesConfig(dbPath string) ([]string, error) {
+	configPath := filepath.Join(dbPath, "dotfiles.yaml")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var config DotfilesConfig
+	if err := yaml.Unmarshal(data, &config); err != nil {
+		return nil, fmt.Errorf("failed to parse %s: %w", configPath, err)
+	}
+
+	return config.Dotfiles, nil
+}
+
+// resolveRootFiles combines db/dotfiles.yaml and the -rootfiles flag into a single deduplicated list.
+func resolveRootFiles(dbPath, rootFilesList string) ([]string, error) {
+	configuredFiles, err := loadDotfilesConfig(dbPath)
+	if err != nil {
+		return nil, err
+	}
+
+	allFiles := append([]string{}, configuredFiles...)
+	allFiles = append(allFiles, parseRootFilesList(rootFilesList)...)
+
+	seen := make(map[string]bool)
+	var rootFiles []string
+	for _, fileName := range allFiles {
+		trimmed := strings.TrimSpace(fileName)
+		if trimmed == "" || seen[trimmed] {
+			continue
+		}
+		seen[trimmed] = true
+		rootFiles = append(rootFiles, trimmed)
+	}
+
+	return rootFiles, nil
+}
+
 // extractActionUses parses a workflow YAML file and extracts all 'uses' statements.
 func extractActionUses(workflowContent string, repoName string, filePath string) []ActionUse {
 	var uses []ActionUse
-	
+
 	// Parse the YAML content
 	var workflow map[string]interface{}
 	err := yaml.Unmarshal([]byte(workflowContent), &workflow)
@@ -442,33 +497,33 @@ func extractActionUses(workflowContent string, repoName string, filePath string)
 		fmt.Printf("Error parsing YAML for %s/%s: %v\n", repoName, filePath, err)
 		return uses
 	}
-	
+
 	// Navigate through jobs
 	jobs, ok := workflow["jobs"].(map[string]interface{})
 	if !ok {
 		return uses
 	}
-	
+
 	// Iterate through each job
 	for _, jobData := range jobs {
 		job, ok := jobData.(map[string]interface{})
 		if !ok {
 			continue
 		}
-		
+
 		// Get steps from the job
 		steps, ok := job["steps"].([]interface{})
 		if !ok {
 			continue
 		}
-		
+
 		// Iterate through each step
 		for _, stepData := range steps {
 			step, ok := stepData.(map[string]interface{})
 			if !ok {
 				continue
 			}
-			
+
 			// Check if step has a 'uses' field
 			if usesVal, ok := step["uses"]; ok {
 				if usesStr, ok := usesVal.(string); ok {
@@ -486,7 +541,7 @@ func extractActionUses(workflowContent string, repoName string, filePath string)
 			}
 		}
 	}
-	
+
 	return uses
 }
 
@@ -499,10 +554,10 @@ func parseUsesString(usesStr string, workflowContent string) (action string, ver
 		// No version specified
 		return parts[0], ""
 	}
-	
+
 	action = parts[0]
 	version = parts[1]
-	
+
 	// Look for the uses line in the original content to get any inline comment
 	lines := strings.Split(workflowContent, "\n")
 	for _, line := range lines {
@@ -525,7 +580,7 @@ func parseUsesString(usesStr string, workflowContent string) (action string, ver
 			break
 		}
 	}
-	
+
 	return action, version
 }
 
@@ -535,7 +590,7 @@ func parseUsesString(usesStr string, workflowContent string) (action string, ver
 func extractCategory(content string) string {
 	lines := strings.Split(content, "\n")
 	prefix := "# dotgithubindexer:"
-	
+
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, prefix) {
@@ -545,7 +600,7 @@ func extractCategory(content string) string {
 			}
 		}
 	}
-	
+
 	return "Default"
 }
 
@@ -1736,7 +1791,7 @@ func generateUSESMarkdown(dbPath, org string, usesIndex *ActionUsesIndex) error 
 		fmt.Printf("No action uses found. Skipping USES.md generation.\n")
 		return nil
 	}
-	
+
 	var markdownBuilder strings.Builder
 	markdownBuilder.WriteString("# GitHub Actions Uses\n\n")
 	markdownBuilder.WriteString("This document provides an index of all GitHub Actions used across workflows in the organization.\n\n")
@@ -1744,39 +1799,39 @@ func generateUSESMarkdown(dbPath, org string, usesIndex *ActionUsesIndex) error 
 	markdownBuilder.WriteString("- **Action**: The GitHub Action being used (e.g., `actions/checkout`)\n")
 	markdownBuilder.WriteString("- **Version**: The specific version of the action, including any inline comments\n")
 	markdownBuilder.WriteString("- **Usage Count**: The number of workflow files using this specific version\n\n")
-	
+
 	// Sort actions alphabetically
 	var actionNames []string
 	for actionName := range usesIndex.Actions {
 		actionNames = append(actionNames, actionName)
 	}
 	sort.Strings(actionNames)
-	
+
 	// For each action, list versions and their usage
 	for _, actionName := range actionNames {
 		versions := usesIndex.Actions[actionName]
-		
+
 		// Sort versions alphabetically
 		var versionKeys []string
 		for version := range versions {
 			versionKeys = append(versionKeys, version)
 		}
 		sort.Strings(versionKeys)
-		
+
 		// Calculate total usage count for this action
 		totalUsage := 0
 		for _, refs := range versions {
 			totalUsage += len(refs)
 		}
-		
+
 		markdownBuilder.WriteString("---\n\n")
 		markdownBuilder.WriteString(fmt.Sprintf("## %s\n\n", actionName))
 		markdownBuilder.WriteString(fmt.Sprintf("**Total Usage**: %d workflow file(s) across %d version(s)\n\n", totalUsage, len(versions)))
-		
+
 		// For each version, create a collapsible section
 		for _, version := range versionKeys {
 			refs := versions[version]
-			
+
 			// Sort references by repo name and file path
 			sort.Slice(refs, func(i, j int) bool {
 				if refs[i].RepoName == refs[j].RepoName {
@@ -1784,46 +1839,46 @@ func generateUSESMarkdown(dbPath, org string, usesIndex *ActionUsesIndex) error 
 				}
 				return refs[i].RepoName < refs[j].RepoName
 			})
-			
+
 			usageCount := len(refs)
-			
+
 			// Display version with usage count
 			versionDisplay := version
 			if versionDisplay == "" {
 				versionDisplay = "(no version specified)"
 			}
-			
+
 			markdownBuilder.WriteString(fmt.Sprintf("### Version: `%s`\n\n", versionDisplay))
 			markdownBuilder.WriteString(fmt.Sprintf("**Usage Count**: %d\n\n", usageCount))
-			
+
 			// Create collapsible section for workflow files
 			// To minimize noise, we'll show up to 10 files directly, and collapse the rest
 			const maxDirectShow = 10
-			
+
 			markdownBuilder.WriteString("<details>\n")
 			markdownBuilder.WriteString(fmt.Sprintf("<summary>Show %d workflow file(s) using this version</summary>\n\n", usageCount))
-			
+
 			// Show all refs in the collapsible section
 			for _, ref := range refs {
 				url := fmt.Sprintf("https://github.com/%s/%s/blob/main/%s", org, ref.RepoName, ref.FilePath)
 				markdownBuilder.WriteString(fmt.Sprintf("- [%s: %s](%s)\n", ref.RepoName, ref.FilePath, url))
 			}
-			
+
 			markdownBuilder.WriteString("\n</details>\n\n")
 		}
-		
+
 		markdownBuilder.WriteString("\n")
 	}
-	
+
 	markdownBuilder.WriteString("\n*This file is automatically generated after each data collection run.*\n")
-	
+
 	// Write to USES.md in db folder
 	usesPath := filepath.Join(dbPath, "USES.md")
 	err := os.WriteFile(usesPath, []byte(markdownBuilder.String()), 0644)
 	if err != nil {
 		return fmt.Errorf("error writing USES.md: %v", err)
 	}
-	
+
 	fmt.Printf("Generated USES.md with %d actions\n", len(actionNames))
 	return nil
 }

@@ -16,6 +16,19 @@ All configuration is provided through command-line flags. There are no configura
 - **`-private`** — Whether to include private repositories. Defaults to `false`.
 - **`-rootfiles`** — A comma-separated list of file names to index from the root of each repository. This is intended for dot files such as `.editorconfig` or `.prettierrc.json`.
 
+## Database Configuration File
+
+Root dot files can also be configured through `db/dotfiles.yaml` in the database directory:
+
+```yaml
+dotfiles:
+  - .gitignore
+  - .repver
+  - .clip4llm
+```
+
+This file is read at startup and preserved in place during indexing.
+
 ## Root Files Configuration
 
 The `-rootfiles` flag accepts a comma-separated list of file names. Each file name is looked up in the root directory of every repository. If the file exists, it is indexed using the same category-based system as dependabot files.
@@ -27,6 +40,8 @@ Example:
 ```
 
 This will look for `.editorconfig`, `.prettierrc.json`, and `.eslintrc.json` in the root of each repository.
+
+If both `db/dotfiles.yaml` and `-rootfiles` are provided, the two sources are merged and deduplicated.
 
 ## Category Comments
 

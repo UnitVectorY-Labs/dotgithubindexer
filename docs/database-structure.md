@@ -8,6 +8,7 @@ dotgithubindexer does not use a traditional database. Instead, it outputs files 
 db/
 ├── README.md
 ├── USES.md
+├── dotfiles.yaml
 ├── repositories.yaml
 ├── workflows/
 │   └── <workflow-name>/
@@ -44,6 +45,10 @@ repositories:
 ### `README.md` (root)
 
 A summary table showing all indexed workflows, dependabot categories, and root file categories with counts of unique versions and total uses.
+
+### `dotfiles.yaml`
+
+Optional configuration file listing root-level dot files to index.
 
 ### `USES.md`
 

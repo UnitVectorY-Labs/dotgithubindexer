@@ -36,7 +36,7 @@ This scans all public repositories in the specified organization and writes the 
 | `-db` | `./db` | Path to the output database directory |
 | `-public` | `true` | Include public repositories |
 | `-private` | `false` | Include private repositories |
-| `-rootfiles` | *(empty)* | Comma-separated list of root dot files to index |
+| `-rootfiles` | *(empty)* | Comma-separated list of root dot files to index, merged with `db/dotfiles.yaml` |
 | `-version` | | Print the version and exit |
 
 ## Examples
@@ -57,6 +57,16 @@ Index root dot files in addition to workflows and dependabot:
 
 ```bash
 dotgithubindexer -org my-org -token ghp_xxxx -rootfiles .editorconfig,.prettierrc.json
+```
+
+Configure root dot files from the database repository:
+
+```yaml
+# db/dotfiles.yaml
+dotfiles:
+  - .gitignore
+  - .repver
+  - .clip4llm
 ```
 
 Write output to a custom directory:
