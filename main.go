@@ -529,8 +529,8 @@ func isNotFoundError(err error) bool {
 		return false
 	}
 
-	if _, ok := err.(*github.ErrorResponse); ok && strings.Contains(err.Error(), "404") {
-		return true
+	if githubErr, ok := err.(*github.ErrorResponse); ok && githubErr.Response != nil {
+		return githubErr.Response.StatusCode == 404
 	}
 
 	return false
