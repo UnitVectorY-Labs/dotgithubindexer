@@ -8,8 +8,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"runtime/debug"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"time"
@@ -48,6 +48,31 @@ type DependabotFile struct {
 	Content  string
 	Hash     string
 	Category string
+}
+
+// DotfilesConfig represents the optional list of additional dotfiles to index.
+type DotfilesConfig struct {
+	Dotfiles []string `yaml:"dotfiles"`
+}
+
+// DotfileFile represents a configured dotfile found in a repository.
+type DotfileFile struct {
+	RepoName string
+	FilePath string
+	Content  string
+	Hash     string
+	Category string
+}
+
+// DotfileIndexEntry maps a repository to a dotfile hash and category.
+type DotfileIndexEntry struct {
+	Hash     string `yaml:"hash"`
+	Category string `yaml:"category,omitempty"`
+}
+
+// DotfileIndex maps repositories to dotfile metadata.
+type DotfileIndex struct {
+	Repositories map[string]DotfileIndexEntry `yaml:"repositories"`
 }
 
 // ActionUse represents a single use of a GitHub action.
@@ -215,7 +240,7 @@ func fetchWorkflowFiles(client *github.Client, repo *github.Repository) ([]Workf
 
 	if err != nil {
 		// If '.github/workflows' is not found, try 'workflows' directly under root
-		if _, ok := err.(*github.ErrorResponse); ok && strings.Contains(err.Error(), "404") {
+		if isNotFoundError(err) {
 			fmt.Printf("No '.github/workflows' directory found in repository '%s'. Trying 'workflows' directory.\n", repo.GetName())
 			_, workflowFiles, _, err = client.Repositories.GetContents(ctx, repo.GetOwner().GetLogin(), repo.GetName(), "workflows", &github.RepositoryContentGetOptions{
 				Ref: defaultBranch,
@@ -241,20 +266,11 @@ func fetchWorkflowFiles(client *github.Client, repo *github.Repository) ([]Workf
 		if file.GetType() == "file" {
 			fmt.Printf("Found workflow file: %s in repository '%s'\n", file.GetPath(), repo.GetName())
 
-			// Fetch the blob to get the content
-			blob, _, err := client.Git.GetBlob(ctx, repo.GetOwner().GetLogin(), repo.GetName(), file.GetSHA())
+			content, err := fetchBlobContent(client, repo.GetOwner().GetLogin(), repo.GetName(), file.GetSHA())
 			if err != nil {
-				fmt.Printf("Error fetching blob for file '%s' in repository '%s': %v\n", file.GetPath(), repo.GetName(), err)
+				fmt.Printf("Error fetching content for file '%s' in repository '%s': %v\n", file.GetPath(), repo.GetName(), err)
 				continue
 			}
-
-			// Decode the content from base64
-			contentBytes, err := base64.StdEncoding.DecodeString(blob.GetContent())
-			if err != nil {
-				fmt.Printf("Error decoding content for file '%s' in repository '%s': %v\n", file.GetPath(), repo.GetName(), err)
-				continue
-			}
-			content := string(contentBytes)
 
 			if content == "" {
 				fmt.Printf("Empty content for file '%s' in repository '%s'\n", file.GetPath(), repo.GetName())
@@ -278,60 +294,101 @@ func fetchWorkflowFiles(client *github.Client, repo *github.Repository) ([]Workf
 func fetchDependabotFile(client *github.Client, repo *github.Repository) (*DependabotFile, error) {
 	ctx := context.Background()
 	defaultBranch := getDefaultBranch(repo)
-	
+
 	// Try to fetch .github/dependabot.yml
 	fileContent, _, _, err := client.Repositories.GetContents(ctx, repo.GetOwner().GetLogin(), repo.GetName(), ".github/dependabot.yml", &github.RepositoryContentGetOptions{
 		Ref: defaultBranch,
 	})
-	
+
 	if err != nil {
 		// If file is not found, return nil without error
-		if _, ok := err.(*github.ErrorResponse); ok && strings.Contains(err.Error(), "404") {
+		if isNotFoundError(err) {
 			fmt.Printf("No '.github/dependabot.yml' file found in repository '%s'.\n", repo.GetName())
 			return nil, nil
 		}
 		fmt.Printf("Error accessing .github/dependabot.yml in repository '%s': %v\n", repo.GetName(), err)
 		return nil, err
 	}
-	
+
 	if fileContent == nil {
 		fmt.Printf("No dependabot.yml file found in repository '%s'.\n", repo.GetName())
 		return nil, nil
 	}
-	
+
 	fmt.Printf("Found dependabot.yml file in repository '%s'\n", repo.GetName())
-	
-	// Fetch the blob to get the content
-	blob, _, err := client.Git.GetBlob(ctx, repo.GetOwner().GetLogin(), repo.GetName(), fileContent.GetSHA())
+
+	content, err := fetchBlobContent(client, repo.GetOwner().GetLogin(), repo.GetName(), fileContent.GetSHA())
 	if err != nil {
-		fmt.Printf("Error fetching blob for dependabot.yml in repository '%s': %v\n", repo.GetName(), err)
+		fmt.Printf("Error fetching content for dependabot.yml in repository '%s': %v\n", repo.GetName(), err)
 		return nil, err
 	}
-	
-	// Decode the content from base64
-	contentBytes, err := base64.StdEncoding.DecodeString(blob.GetContent())
-	if err != nil {
-		fmt.Printf("Error decoding content for dependabot.yml in repository '%s': %v\n", repo.GetName(), err)
-		return nil, err
-	}
-	content := string(contentBytes)
-	
+
 	if content == "" {
 		fmt.Printf("Empty content for dependabot.yml in repository '%s'\n", repo.GetName())
 		return nil, nil
 	}
-	
+
 	hash := computeHash([]byte(content))
 	category := extractCategory(content)
-	
+
 	fmt.Printf("Hashing dependabot.yml in repository '%s': %s (category: %s)\n", repo.GetName(), hash, category)
-	
+
 	return &DependabotFile{
 		RepoName: repo.GetName(),
 		Content:  content,
 		Hash:     hash,
 		Category: category,
 	}, nil
+}
+
+// fetchConfiguredDotfiles retrieves configured dotfiles outside of .github from a repository if they exist.
+func fetchConfiguredDotfiles(client *github.Client, repo *github.Repository, configuredPaths []string) ([]DotfileFile, error) {
+	ctx := context.Background()
+	defaultBranch := getDefaultBranch(repo)
+	dotfiles := make([]DotfileFile, 0, len(configuredPaths))
+
+	for _, dotfilePath := range configuredPaths {
+		fileContent, _, _, err := client.Repositories.GetContents(ctx, repo.GetOwner().GetLogin(), repo.GetName(), dotfilePath, &github.RepositoryContentGetOptions{
+			Ref: defaultBranch,
+		})
+		if err != nil {
+			if isNotFoundError(err) {
+				fmt.Printf("No configured dotfile '%s' found in repository '%s'.\n", dotfilePath, repo.GetName())
+				continue
+			}
+			fmt.Printf("Error accessing configured dotfile '%s' in repository '%s': %v\n", dotfilePath, repo.GetName(), err)
+			return nil, err
+		}
+
+		if fileContent == nil {
+			fmt.Printf("No configured dotfile '%s' found in repository '%s'.\n", dotfilePath, repo.GetName())
+			continue
+		}
+
+		content, err := fetchBlobContent(client, repo.GetOwner().GetLogin(), repo.GetName(), fileContent.GetSHA())
+		if err != nil {
+			fmt.Printf("Error fetching content for configured dotfile '%s' in repository '%s': %v\n", dotfilePath, repo.GetName(), err)
+			return nil, err
+		}
+		if content == "" {
+			fmt.Printf("Empty content for configured dotfile '%s' in repository '%s'\n", dotfilePath, repo.GetName())
+			continue
+		}
+
+		hash := computeHash([]byte(content))
+		category := extractCategory(content)
+		fmt.Printf("Hashing configured dotfile '%s' in repository '%s': %s (category: %s)\n", dotfilePath, repo.GetName(), hash, category)
+
+		dotfiles = append(dotfiles, DotfileFile{
+			RepoName: repo.GetName(),
+			FilePath: dotfilePath,
+			Content:  content,
+			Hash:     hash,
+			Category: category,
+		})
+	}
+
+	return dotfiles, nil
 }
 
 // getDefaultBranch retrieves the default branch of a repository.
@@ -351,7 +408,7 @@ func computeHash(content []byte) string {
 // extractActionUses parses a workflow YAML file and extracts all 'uses' statements.
 func extractActionUses(workflowContent string, repoName string, filePath string) []ActionUse {
 	var uses []ActionUse
-	
+
 	// Parse the YAML content
 	var workflow map[string]interface{}
 	err := yaml.Unmarshal([]byte(workflowContent), &workflow)
@@ -359,33 +416,33 @@ func extractActionUses(workflowContent string, repoName string, filePath string)
 		fmt.Printf("Error parsing YAML for %s/%s: %v\n", repoName, filePath, err)
 		return uses
 	}
-	
+
 	// Navigate through jobs
 	jobs, ok := workflow["jobs"].(map[string]interface{})
 	if !ok {
 		return uses
 	}
-	
+
 	// Iterate through each job
 	for _, jobData := range jobs {
 		job, ok := jobData.(map[string]interface{})
 		if !ok {
 			continue
 		}
-		
+
 		// Get steps from the job
 		steps, ok := job["steps"].([]interface{})
 		if !ok {
 			continue
 		}
-		
+
 		// Iterate through each step
 		for _, stepData := range steps {
 			step, ok := stepData.(map[string]interface{})
 			if !ok {
 				continue
 			}
-			
+
 			// Check if step has a 'uses' field
 			if usesVal, ok := step["uses"]; ok {
 				if usesStr, ok := usesVal.(string); ok {
@@ -403,7 +460,7 @@ func extractActionUses(workflowContent string, repoName string, filePath string)
 			}
 		}
 	}
-	
+
 	return uses
 }
 
@@ -416,10 +473,10 @@ func parseUsesString(usesStr string, workflowContent string) (action string, ver
 		// No version specified
 		return parts[0], ""
 	}
-	
+
 	action = parts[0]
 	version = parts[1]
-	
+
 	// Look for the uses line in the original content to get any inline comment
 	lines := strings.Split(workflowContent, "\n")
 	for _, line := range lines {
@@ -442,7 +499,7 @@ func parseUsesString(usesStr string, workflowContent string) (action string, ver
 			break
 		}
 	}
-	
+
 	return action, version
 }
 
@@ -452,7 +509,7 @@ func parseUsesString(usesStr string, workflowContent string) (action string, ver
 func extractCategory(content string) string {
 	lines := strings.Split(content, "\n")
 	prefix := "# dotgithubindexer:"
-	
+
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, prefix) {
@@ -462,8 +519,105 @@ func extractCategory(content string) string {
 			}
 		}
 	}
-	
+
 	return "Default"
+}
+
+// isNotFoundError reports whether the GitHub API error represents a missing file or directory.
+func isNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	if _, ok := err.(*github.ErrorResponse); ok && strings.Contains(err.Error(), "404") {
+		return true
+	}
+
+	return false
+}
+
+// fetchBlobContent retrieves and decodes the blob content for the provided SHA.
+func fetchBlobContent(client *github.Client, owner, repoName, sha string) (string, error) {
+	ctx := context.Background()
+	blob, _, err := client.Git.GetBlob(ctx, owner, repoName, sha)
+	if err != nil {
+		return "", err
+	}
+
+	contentBytes, err := base64.StdEncoding.DecodeString(blob.GetContent())
+	if err != nil {
+		return "", err
+	}
+
+	return string(contentBytes), nil
+}
+
+// normalizeDotfilePath converts a configured path into a clean repository-relative path.
+func normalizeDotfilePath(dotfilePath string) (string, error) {
+	cleaned := strings.TrimSpace(dotfilePath)
+	if cleaned == "" {
+		return "", fmt.Errorf("dotfile path cannot be empty")
+	}
+
+	for strings.HasPrefix(cleaned, "./") {
+		cleaned = strings.TrimPrefix(cleaned, "./")
+	}
+
+	cleaned = filepath.ToSlash(filepath.Clean(cleaned))
+	if cleaned == "." || cleaned == "" {
+		return "", fmt.Errorf("dotfile path cannot be empty")
+	}
+	if strings.HasPrefix(cleaned, "/") {
+		return "", fmt.Errorf("dotfile path must be repository-relative: %s", dotfilePath)
+	}
+	if strings.HasPrefix(cleaned, "../") || strings.Contains(cleaned, "/../") {
+		return "", fmt.Errorf("dotfile path must stay within the repository: %s", dotfilePath)
+	}
+	if cleaned == ".github" || strings.HasPrefix(cleaned, ".github/") {
+		return "", fmt.Errorf("dotfile path must be outside the .github directory: %s", dotfilePath)
+	}
+
+	return cleaned, nil
+}
+
+// loadDotfilesConfig loads the optional dotfiles configuration from the database directory.
+func loadDotfilesConfig(dbPath string) (*DotfilesConfig, error) {
+	configPath := filepath.Join(dbPath, "dotfiles.yaml")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Printf("No 'dotfiles.yaml' file found at '%s'. Skipping extra dotfile indexing.\n", configPath)
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var config DotfilesConfig
+	if err := yaml.Unmarshal(data, &config); err != nil {
+		return nil, fmt.Errorf("failed to parse dotfiles config: %v", err)
+	}
+
+	seen := make(map[string]bool)
+	normalized := make([]string, 0, len(config.Dotfiles))
+	for _, dotfilePath := range config.Dotfiles {
+		cleaned, err := normalizeDotfilePath(dotfilePath)
+		if err != nil {
+			return nil, err
+		}
+		if !seen[cleaned] {
+			seen[cleaned] = true
+			normalized = append(normalized, cleaned)
+		}
+	}
+
+	sort.Strings(normalized)
+	config.Dotfiles = normalized
+
+	if len(config.Dotfiles) == 0 {
+		fmt.Printf("'dotfiles.yaml' at '%s' does not define any dotfiles. Skipping extra dotfile indexing.\n", configPath)
+	}
+
+	return &config, nil
 }
 
 // ------------------------
@@ -699,6 +853,167 @@ func storeDependabotVersion(dbPath, category, hash, content string) error {
 	return nil
 }
 
+// dotfileStoragePath returns the database path for a configured dotfile.
+func dotfileStoragePath(dbPath, dotfilePath string) string {
+	return filepath.Join(dbPath, "dotfiles", filepath.FromSlash(dotfilePath))
+}
+
+// updateDotfileIndex maps a repository to a configured dotfile hash and category.
+func updateDotfileIndex(dbPath, dotfilePath, repoName, hash, category string) error {
+	storagePath := dotfileStoragePath(dbPath, dotfilePath)
+	if err := os.MkdirAll(storagePath, os.ModePerm); err != nil {
+		return err
+	}
+
+	indexPath := filepath.Join(storagePath, "index.yaml")
+	var index DotfileIndex
+
+	if _, err := os.Stat(indexPath); err == nil {
+		data, err := os.ReadFile(indexPath)
+		if err != nil {
+			return err
+		}
+		if err := yaml.Unmarshal(data, &index); err != nil {
+			return err
+		}
+	} else {
+		index = DotfileIndex{Repositories: make(map[string]DotfileIndexEntry)}
+	}
+
+	if index.Repositories == nil {
+		index.Repositories = make(map[string]DotfileIndexEntry)
+	}
+
+	index.Repositories[repoName] = DotfileIndexEntry{
+		Hash:     hash,
+		Category: category,
+	}
+
+	sortedKeys := make([]string, 0, len(index.Repositories))
+	for k := range index.Repositories {
+		sortedKeys = append(sortedKeys, k)
+	}
+	sort.Strings(sortedKeys)
+
+	sortedRepositories := make(map[string]DotfileIndexEntry)
+	for _, k := range sortedKeys {
+		sortedRepositories[k] = index.Repositories[k]
+	}
+	index.Repositories = sortedRepositories
+
+	updatedData, err := yaml.Marshal(&index)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(indexPath, updatedData, 0644); err != nil {
+		return err
+	}
+
+	fmt.Printf("Updated dotfile index for '%s' with repository '%s'\n", dotfilePath, repoName)
+	return nil
+}
+
+// storeDotfileVersion saves the configured dotfile content under its hash.
+func storeDotfileVersion(dbPath, dotfilePath, hash, content string) error {
+	storagePath := dotfileStoragePath(dbPath, dotfilePath)
+	if err := os.MkdirAll(storagePath, os.ModePerm); err != nil {
+		return err
+	}
+
+	filePath := filepath.Join(storagePath, hash)
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		fmt.Printf("Storing configured dotfile '%s' under hash '%s'\n", dotfilePath, hash)
+		return os.WriteFile(filePath, []byte(content), 0644)
+	}
+
+	fmt.Printf("Configured dotfile '%s' with hash '%s' already exists. Skipping write.\n", dotfilePath, hash)
+	return nil
+}
+
+// walkDotfileIndexes returns all configured dotfile storage directories that contain an index.yaml file.
+func walkDotfileIndexes(dbPath string) ([]string, error) {
+	dotfilesPath := filepath.Join(dbPath, "dotfiles")
+	if _, err := os.Stat(dotfilesPath); os.IsNotExist(err) {
+		return nil, nil
+	}
+
+	var dotfilePaths []string
+	err := filepath.Walk(dotfilesPath, func(currentPath string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() || info.Name() != "index.yaml" {
+			return nil
+		}
+
+		relativePath, err := filepath.Rel(dotfilesPath, filepath.Dir(currentPath))
+		if err != nil {
+			return err
+		}
+
+		dotfilePaths = append(dotfilePaths, filepath.ToSlash(relativePath))
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	sort.Strings(dotfilePaths)
+	return dotfilePaths, nil
+}
+
+// loadDotfileIndex loads a configured dotfile index by path.
+func loadDotfileIndex(dbPath, dotfilePath string) (DotfileIndex, error) {
+	indexPath := filepath.Join(dotfileStoragePath(dbPath, dotfilePath), "index.yaml")
+	var index DotfileIndex
+	data, err := os.ReadFile(indexPath)
+	if err != nil {
+		return index, err
+	}
+	if err := yaml.Unmarshal(data, &index); err != nil {
+		return index, err
+	}
+	if index.Repositories == nil {
+		index.Repositories = make(map[string]DotfileIndexEntry)
+	}
+	return index, nil
+}
+
+// dotfilesUseCategories reports whether any configured dotfile uses a non-default category.
+func dotfilesUseCategories(dbPath string) bool {
+	dotfilePaths, err := walkDotfileIndexes(dbPath)
+	if err != nil {
+		fmt.Printf("Error inspecting configured dotfile categories: %v\n", err)
+		return false
+	}
+
+	for _, dotfilePath := range dotfilePaths {
+		index, err := loadDotfileIndex(dbPath, dotfilePath)
+		if err != nil {
+			fmt.Printf("Error loading configured dotfile index for '%s': %v\n", dotfilePath, err)
+			continue
+		}
+		for _, entry := range index.Repositories {
+			if entry.Category != "" && entry.Category != "Default" {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// clearDotfilesOutput removes generated dotfile output when dotfile indexing is disabled.
+func clearDotfilesOutput(dbPath string) error {
+	dotfilesPath := filepath.Join(dbPath, "dotfiles")
+	if _, err := os.Stat(dotfilesPath); os.IsNotExist(err) {
+		return nil
+	}
+
+	fmt.Printf("Removing configured dotfile output at '%s' because dotfile indexing is disabled.\n", dotfilesPath)
+	return os.RemoveAll(dotfilesPath)
+}
+
 // ------------------------
 // Section: Garbage Collection
 // ------------------------
@@ -823,6 +1138,51 @@ func garbageCollectDependabot(dbPath string) error {
 	return nil
 }
 
+// garbageCollectDotfiles removes unused configured dotfile versions from the database.
+func garbageCollectDotfiles(dbPath string) error {
+	dotfilePaths, err := walkDotfileIndexes(dbPath)
+	if err != nil {
+		return err
+	}
+	if len(dotfilePaths) == 0 {
+		fmt.Printf("No 'dotfiles' directory found at '%s'. Skipping garbage collection.\n", filepath.Join(dbPath, "dotfiles"))
+		return nil
+	}
+
+	for _, dotfilePath := range dotfilePaths {
+		index, err := loadDotfileIndex(dbPath, dotfilePath)
+		if err != nil {
+			fmt.Printf("No index found for configured dotfile '%s'. Skipping.\n", dotfilePath)
+			continue
+		}
+
+		hashesInUse := make(map[string]bool)
+		for _, entry := range index.Repositories {
+			hashesInUse[entry.Hash] = true
+		}
+
+		storagePath := dotfileStoragePath(dbPath, dotfilePath)
+		files, err := os.ReadDir(storagePath)
+		if err != nil {
+			fmt.Printf("Error reading configured dotfile directory '%s': %v\n", storagePath, err)
+			continue
+		}
+
+		for _, file := range files {
+			if file.IsDir() || file.Name() == "index.yaml" || file.Name() == "README.md" {
+				continue
+			}
+			if !hashesInUse[file.Name()] {
+				fmt.Printf("Removing unused configured dotfile '%s' from '%s'\n", file.Name(), dotfilePath)
+				_ = os.Remove(filepath.Join(storagePath, file.Name()))
+			}
+		}
+	}
+
+	fmt.Println("Configured dotfile garbage collection completed.")
+	return nil
+}
+
 // ------------------------
 // Section: Rate Limiting
 // ------------------------
@@ -858,6 +1218,17 @@ func auditGitHubActions(org, token, dbPath string, includePub, includePrv bool) 
 		return fmt.Errorf("failed to initialize database: %v", err)
 	}
 
+	dotfilesConfig, err := loadDotfilesConfig(dbPath)
+	if err != nil {
+		return fmt.Errorf("failed to load dotfiles config: %v", err)
+	}
+	dotfilesEnabled := dotfilesConfig != nil && len(dotfilesConfig.Dotfiles) > 0
+	if !dotfilesEnabled {
+		if err := clearDotfilesOutput(dbPath); err != nil {
+			return fmt.Errorf("failed to clear dotfiles output: %v", err)
+		}
+	}
+
 	// Initialize action uses index
 	usesIndex := &ActionUsesIndex{
 		Actions: make(map[string]map[string][]WorkflowReference),
@@ -883,43 +1254,39 @@ func auditGitHubActions(org, token, dbPath string, includePub, includePrv bool) 
 		workflows, err := fetchWorkflowFiles(client, repo)
 		if err != nil {
 			fmt.Printf("Error fetching workflow files for %s: %v\n", repoName, err)
-			continue
-		}
-
-		if len(workflows) == 0 {
+		} else if len(workflows) == 0 {
 			fmt.Printf("No workflow files to process in repository '%s'.\n", repoName)
-			continue
-		}
+		} else {
+			for _, wf := range workflows {
+				actionName := filepath.Base(wf.FilePath)
 
-		for _, wf := range workflows {
-			actionName := filepath.Base(wf.FilePath)
-
-			// Update action index
-			if err := updateActionIndex(dbPath, actionName, wf.RepoName, wf.Hash); err != nil {
-				fmt.Printf("Error updating action index for %s in %s: %v\n", actionName, repoName, err)
-				continue
-			}
-
-			// Store action version
-			if err := storeActionVersion(dbPath, actionName, wf.Hash, wf.Content); err != nil {
-				fmt.Printf("Error storing action version for %s in %s: %v\n", actionName, repoName, err)
-				continue
-			}
-
-			// Extract action uses from workflow content
-			uses := extractActionUses(wf.Content, wf.RepoName, wf.FilePath)
-			for _, use := range uses {
-				// Add to uses index
-				if _, ok := usesIndex.Actions[use.Action]; !ok {
-					usesIndex.Actions[use.Action] = make(map[string][]WorkflowReference)
+				// Update action index
+				if err := updateActionIndex(dbPath, actionName, wf.RepoName, wf.Hash); err != nil {
+					fmt.Printf("Error updating action index for %s in %s: %v\n", actionName, repoName, err)
+					continue
 				}
-				usesIndex.Actions[use.Action][use.Version] = append(
-					usesIndex.Actions[use.Action][use.Version],
-					WorkflowReference{
-						RepoName: use.RepoName,
-						FilePath: use.FilePath,
-					},
-				)
+
+				// Store action version
+				if err := storeActionVersion(dbPath, actionName, wf.Hash, wf.Content); err != nil {
+					fmt.Printf("Error storing action version for %s in %s: %v\n", actionName, repoName, err)
+					continue
+				}
+
+				// Extract action uses from workflow content
+				uses := extractActionUses(wf.Content, wf.RepoName, wf.FilePath)
+				for _, use := range uses {
+					// Add to uses index
+					if _, ok := usesIndex.Actions[use.Action]; !ok {
+						usesIndex.Actions[use.Action] = make(map[string][]WorkflowReference)
+					}
+					usesIndex.Actions[use.Action][use.Version] = append(
+						usesIndex.Actions[use.Action][use.Version],
+						WorkflowReference{
+							RepoName: use.RepoName,
+							FilePath: use.FilePath,
+						},
+					)
+				}
 			}
 		}
 
@@ -942,6 +1309,23 @@ func auditGitHubActions(org, token, dbPath string, includePub, includePrv bool) 
 			}
 		}
 
+		if dotfilesEnabled {
+			dotfiles, err := fetchConfiguredDotfiles(client, repo, dotfilesConfig.Dotfiles)
+			if err != nil {
+				fmt.Printf("Error fetching configured dotfiles for %s: %v\n", repoName, err)
+			} else {
+				for _, dotfile := range dotfiles {
+					if err := updateDotfileIndex(dbPath, dotfile.FilePath, dotfile.RepoName, dotfile.Hash, dotfile.Category); err != nil {
+						fmt.Printf("Error updating dotfile index for %s in %s: %v\n", dotfile.FilePath, repoName, err)
+						continue
+					}
+					if err := storeDotfileVersion(dbPath, dotfile.FilePath, dotfile.Hash, dotfile.Content); err != nil {
+						fmt.Printf("Error storing dotfile version for %s in %s: %v\n", dotfile.FilePath, repoName, err)
+					}
+				}
+			}
+		}
+
 		// Handle rate limiting after processing each repository
 		if err := checkRateLimit(client); err != nil {
 			return fmt.Errorf("rate limit check failed: %v", err)
@@ -958,6 +1342,12 @@ func auditGitHubActions(org, token, dbPath string, includePub, includePrv bool) 
 		fmt.Printf("Error during dependabot garbage collection: %v\n", err)
 	}
 
+	if dotfilesEnabled {
+		if err := garbageCollectDotfiles(dbPath); err != nil {
+			fmt.Printf("Error during configured dotfile garbage collection: %v\n", err)
+		}
+	}
+
 	// Generate README.md files
 	if err := generateReadmeFiles(dbPath, org); err != nil {
 		fmt.Printf("Error generating README.md files: %v\n", err)
@@ -966,6 +1356,12 @@ func auditGitHubActions(org, token, dbPath string, includePub, includePrv bool) 
 	// Generate README.md files for dependabot
 	if err := generateDependabotReadmeFiles(dbPath, org); err != nil {
 		fmt.Printf("Error generating dependabot README.md files: %v\n", err)
+	}
+
+	if dotfilesEnabled {
+		if err := generateDotfileReadmeFiles(dbPath, org); err != nil {
+			fmt.Printf("Error generating configured dotfile README.md files: %v\n", err)
+		}
 	}
 
 	// Generate summary README.md in db folder
@@ -1123,6 +1519,104 @@ func generateDependabotReadmeFiles(dbPath, org string) error {
 	return nil
 }
 
+// generateDotfileReadmeFiles creates README.md files for each configured dotfile path.
+func generateDotfileReadmeFiles(dbPath, org string) error {
+	dotfilePaths, err := walkDotfileIndexes(dbPath)
+	if err != nil {
+		return fmt.Errorf("failed to inspect dotfiles directory: %v", err)
+	}
+	if len(dotfilePaths) == 0 {
+		fmt.Printf("No 'dotfiles' directory found at '%s'. Skipping README generation.\n", filepath.Join(dbPath, "dotfiles"))
+		return nil
+	}
+
+	useCategories := dotfilesUseCategories(dbPath)
+
+	for _, dotfilePath := range dotfilePaths {
+		index, err := loadDotfileIndex(dbPath, dotfilePath)
+		if err != nil {
+			fmt.Printf("Skipping configured dotfile '%s' due to missing index.yaml.\n", dotfilePath)
+			continue
+		}
+
+		var markdownBuilder strings.Builder
+		markdownBuilder.WriteString(fmt.Sprintf("# %s\n\n", dotfilePath))
+
+		if useCategories {
+			categoryToHashes := make(map[string]map[string][]string)
+			for repo, entry := range index.Repositories {
+				category := entry.Category
+				if category == "" {
+					category = "Default"
+				}
+				if _, ok := categoryToHashes[category]; !ok {
+					categoryToHashes[category] = make(map[string][]string)
+				}
+				categoryToHashes[category][entry.Hash] = append(categoryToHashes[category][entry.Hash], repo)
+			}
+
+			var categories []string
+			for category := range categoryToHashes {
+				categories = append(categories, category)
+			}
+			sort.Strings(categories)
+
+			for _, category := range categories {
+				markdownBuilder.WriteString(fmt.Sprintf("## %s\n\n", category))
+
+				var hashes []string
+				for hash := range categoryToHashes[category] {
+					hashes = append(hashes, hash)
+				}
+				sort.Strings(hashes)
+
+				for _, hash := range hashes {
+					repos := categoryToHashes[category][hash]
+					sort.Strings(repos)
+					markdownBuilder.WriteString(fmt.Sprintf("### [%s](%s)\n\n", hash, hash))
+					for _, repo := range repos {
+						url := fmt.Sprintf("https://github.com/%s/%s/blob/main/%s", org, repo, dotfilePath)
+						markdownBuilder.WriteString(fmt.Sprintf("- [%s](%s)\n", repo, url))
+					}
+					markdownBuilder.WriteString("\n")
+				}
+			}
+		} else {
+			hashToRepos := make(map[string][]string)
+			for repo, entry := range index.Repositories {
+				hashToRepos[entry.Hash] = append(hashToRepos[entry.Hash], repo)
+			}
+
+			var hashes []string
+			for hash := range hashToRepos {
+				hashes = append(hashes, hash)
+			}
+			sort.Strings(hashes)
+
+			for _, hash := range hashes {
+				repos := hashToRepos[hash]
+				sort.Strings(repos)
+				markdownBuilder.WriteString(fmt.Sprintf("## [%s](%s)\n\n", hash, hash))
+				for _, repo := range repos {
+					url := fmt.Sprintf("https://github.com/%s/%s/blob/main/%s", org, repo, dotfilePath)
+					markdownBuilder.WriteString(fmt.Sprintf("- [%s](%s)\n", repo, url))
+				}
+				markdownBuilder.WriteString("\n")
+			}
+		}
+
+		readmePath := filepath.Join(dotfileStoragePath(dbPath, dotfilePath), "README.md")
+		if err := os.WriteFile(readmePath, []byte(markdownBuilder.String()), 0644); err != nil {
+			fmt.Printf("Error writing README.md for configured dotfile '%s': %v\n", dotfilePath, err)
+			continue
+		}
+
+		fmt.Printf("Generated README.md for configured dotfile '%s'\n", dotfilePath)
+	}
+
+	return nil
+}
+
 // generateDBSummary creates a summary README.md file in the db folder with workflow statistics.
 func generateDBSummary(dbPath string) error {
 	actionsPath := filepath.Join(dbPath, "workflows")
@@ -1236,6 +1730,56 @@ func generateDBSummary(dbPath string) error {
 		return dependabotSummaries[i].Category < dependabotSummaries[j].Category
 	})
 
+	type DotfileSummary struct {
+		Path           string
+		UniqueVersions int
+		TotalUses      int
+		Categories     []string
+	}
+
+	var dotfileSummaries []DotfileSummary
+	useDotfileCategories := dotfilesUseCategories(dbPath)
+	dotfilePaths, err := walkDotfileIndexes(dbPath)
+	if err == nil {
+		for _, dotfilePath := range dotfilePaths {
+			index, err := loadDotfileIndex(dbPath, dotfilePath)
+			if err != nil {
+				fmt.Printf("Skipping configured dotfile '%s' due to missing index.yaml.\n", dotfilePath)
+				continue
+			}
+
+			uniqueHashes := make(map[string]bool)
+			categorySet := make(map[string]bool)
+			totalUses := len(index.Repositories)
+
+			for _, entry := range index.Repositories {
+				uniqueHashes[entry.Hash] = true
+				category := entry.Category
+				if category == "" {
+					category = "Default"
+				}
+				categorySet[category] = true
+			}
+
+			var categories []string
+			for category := range categorySet {
+				categories = append(categories, category)
+			}
+			sort.Strings(categories)
+
+			dotfileSummaries = append(dotfileSummaries, DotfileSummary{
+				Path:           dotfilePath,
+				UniqueVersions: len(uniqueHashes),
+				TotalUses:      totalUses,
+				Categories:     categories,
+			})
+		}
+	}
+
+	sort.Slice(dotfileSummaries, func(i, j int) bool {
+		return dotfileSummaries[i].Path < dotfileSummaries[j].Path
+	})
+
 	// Generate markdown content
 	var markdownBuilder strings.Builder
 	markdownBuilder.WriteString("# Workflow Summary\n\n")
@@ -1273,6 +1817,34 @@ func generateDBSummary(dbPath string) error {
 		}
 	}
 
+	if len(dotfileSummaries) > 0 {
+		markdownBuilder.WriteString("\n## Dotfile Summary\n\n")
+		markdownBuilder.WriteString("This table provides a summary of configured dotfiles found outside of the `.github` directory.\n\n")
+		markdownBuilder.WriteString("**Legend:**\n")
+		markdownBuilder.WriteString("- **Dotfile Path**: The repository-relative path configured in `dotfiles.yaml`\n")
+		if useDotfileCategories {
+			markdownBuilder.WriteString("- **Categories**: The `# dotgithubindexer: <category>` groups found for that configured dotfile path\n")
+		}
+		markdownBuilder.WriteString("- **Unique Versions**: The number of unique content hashes representing different versions of the configured dotfile\n")
+		markdownBuilder.WriteString("- **Total Uses**: The total number of repositories where the configured dotfile exists\n\n")
+
+		if useDotfileCategories {
+			markdownBuilder.WriteString("| Dotfile Path | Categories | Unique Versions | Total Uses |\n")
+			markdownBuilder.WriteString("|--------------|------------|-----------------|------------|\n")
+			for _, summary := range dotfileSummaries {
+				markdownBuilder.WriteString(fmt.Sprintf("| [%s](dotfiles/%s/README.md) | %s | %d | %d |\n",
+					summary.Path, summary.Path, strings.Join(summary.Categories, ", "), summary.UniqueVersions, summary.TotalUses))
+			}
+		} else {
+			markdownBuilder.WriteString("| Dotfile Path | Unique Versions | Total Uses |\n")
+			markdownBuilder.WriteString("|--------------|-----------------|------------|\n")
+			for _, summary := range dotfileSummaries {
+				markdownBuilder.WriteString(fmt.Sprintf("| [%s](dotfiles/%s/README.md) | %d | %d |\n",
+					summary.Path, summary.Path, summary.UniqueVersions, summary.TotalUses))
+			}
+		}
+	}
+
 	markdownBuilder.WriteString("\n*This file is automatically generated after each data collection run.*\n")
 
 	// Write to README.md in db folder
@@ -1282,7 +1854,7 @@ func generateDBSummary(dbPath string) error {
 		return fmt.Errorf("error writing DB summary README.md: %v", err)
 	}
 
-	fmt.Printf("Generated DB summary README.md with %d workflows and %d dependabot categories\n", len(summaries), len(dependabotSummaries))
+	fmt.Printf("Generated DB summary README.md with %d workflows, %d dependabot categories, and %d configured dotfiles\n", len(summaries), len(dependabotSummaries), len(dotfileSummaries))
 	return nil
 }
 
@@ -1292,7 +1864,7 @@ func generateUSESMarkdown(dbPath, org string, usesIndex *ActionUsesIndex) error 
 		fmt.Printf("No action uses found. Skipping USES.md generation.\n")
 		return nil
 	}
-	
+
 	var markdownBuilder strings.Builder
 	markdownBuilder.WriteString("# GitHub Actions Uses\n\n")
 	markdownBuilder.WriteString("This document provides an index of all GitHub Actions used across workflows in the organization.\n\n")
@@ -1300,39 +1872,39 @@ func generateUSESMarkdown(dbPath, org string, usesIndex *ActionUsesIndex) error 
 	markdownBuilder.WriteString("- **Action**: The GitHub Action being used (e.g., `actions/checkout`)\n")
 	markdownBuilder.WriteString("- **Version**: The specific version of the action, including any inline comments\n")
 	markdownBuilder.WriteString("- **Usage Count**: The number of workflow files using this specific version\n\n")
-	
+
 	// Sort actions alphabetically
 	var actionNames []string
 	for actionName := range usesIndex.Actions {
 		actionNames = append(actionNames, actionName)
 	}
 	sort.Strings(actionNames)
-	
+
 	// For each action, list versions and their usage
 	for _, actionName := range actionNames {
 		versions := usesIndex.Actions[actionName]
-		
+
 		// Sort versions alphabetically
 		var versionKeys []string
 		for version := range versions {
 			versionKeys = append(versionKeys, version)
 		}
 		sort.Strings(versionKeys)
-		
+
 		// Calculate total usage count for this action
 		totalUsage := 0
 		for _, refs := range versions {
 			totalUsage += len(refs)
 		}
-		
+
 		markdownBuilder.WriteString("---\n\n")
 		markdownBuilder.WriteString(fmt.Sprintf("## %s\n\n", actionName))
 		markdownBuilder.WriteString(fmt.Sprintf("**Total Usage**: %d workflow file(s) across %d version(s)\n\n", totalUsage, len(versions)))
-		
+
 		// For each version, create a collapsible section
 		for _, version := range versionKeys {
 			refs := versions[version]
-			
+
 			// Sort references by repo name and file path
 			sort.Slice(refs, func(i, j int) bool {
 				if refs[i].RepoName == refs[j].RepoName {
@@ -1340,46 +1912,46 @@ func generateUSESMarkdown(dbPath, org string, usesIndex *ActionUsesIndex) error 
 				}
 				return refs[i].RepoName < refs[j].RepoName
 			})
-			
+
 			usageCount := len(refs)
-			
+
 			// Display version with usage count
 			versionDisplay := version
 			if versionDisplay == "" {
 				versionDisplay = "(no version specified)"
 			}
-			
+
 			markdownBuilder.WriteString(fmt.Sprintf("### Version: `%s`\n\n", versionDisplay))
 			markdownBuilder.WriteString(fmt.Sprintf("**Usage Count**: %d\n\n", usageCount))
-			
+
 			// Create collapsible section for workflow files
 			// To minimize noise, we'll show up to 10 files directly, and collapse the rest
 			const maxDirectShow = 10
-			
+
 			markdownBuilder.WriteString("<details>\n")
 			markdownBuilder.WriteString(fmt.Sprintf("<summary>Show %d workflow file(s) using this version</summary>\n\n", usageCount))
-			
+
 			// Show all refs in the collapsible section
 			for _, ref := range refs {
 				url := fmt.Sprintf("https://github.com/%s/%s/blob/main/%s", org, ref.RepoName, ref.FilePath)
 				markdownBuilder.WriteString(fmt.Sprintf("- [%s: %s](%s)\n", ref.RepoName, ref.FilePath, url))
 			}
-			
+
 			markdownBuilder.WriteString("\n</details>\n\n")
 		}
-		
+
 		markdownBuilder.WriteString("\n")
 	}
-	
+
 	markdownBuilder.WriteString("\n*This file is automatically generated after each data collection run.*\n")
-	
+
 	// Write to USES.md in db folder
 	usesPath := filepath.Join(dbPath, "USES.md")
 	err := os.WriteFile(usesPath, []byte(markdownBuilder.String()), 0644)
 	if err != nil {
 		return fmt.Errorf("error writing USES.md: %v", err)
 	}
-	
+
 	fmt.Printf("Generated USES.md with %d actions\n", len(actionNames))
 	return nil
 }
