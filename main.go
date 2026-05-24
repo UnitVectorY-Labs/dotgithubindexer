@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -107,6 +109,7 @@ var (
 )
 
 var Version = "dev" // This will be set by the build systems to the release version
+var semverRe = regexp.MustCompile(`^\d+\.\d+\.\d+`)
 
 // ------------------------
 // Section: Main Function and CLI Setup
@@ -134,7 +137,7 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Println("Version:", Version)
+		fmt.Printf("dotgithubindexer version %s\n", buildVersionOutput(Version))
 		return
 	}
 
@@ -156,6 +159,14 @@ func main() {
 	}
 
 	fmt.Printf("Audit completed successfully in %v.\n", time.Since(startTime))
+}
+
+func buildVersionOutput(version string) string {
+	normalized := version
+	if semverRe.MatchString(normalized) && !strings.HasPrefix(normalized, "v") {
+		normalized = "v" + normalized
+	}
+	return fmt.Sprintf("%s (%s, %s/%s)", normalized, runtime.Version(), runtime.GOOS, runtime.GOARCH)
 }
 
 // ------------------------

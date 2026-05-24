@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -155,5 +156,32 @@ func TestClearDotfilesOutputRemovesGeneratedDotfiles(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(dbPath, "dotfiles")); !os.IsNotExist(err) {
 		t.Fatalf("expected dotfiles directory to be removed, got err=%v", err)
+	}
+}
+
+func TestBuildVersionOutput(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		version string
+		want    string
+	}{
+		{name: "adds semver v prefix", version: "1.2.3", want: "v1.2.3"},
+		{name: "keeps semver v prefix", version: "v1.2.3", want: "v1.2.3"},
+		{name: "keeps non semver", version: "dev", want: "dev"},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := buildVersionOutput(tt.version)
+			want := tt.want + " (" + runtime.Version() + ", " + runtime.GOOS + "/" + runtime.GOARCH + ")"
+			if got != want {
+				t.Fatalf("buildVersionOutput(%q) = %q, want %q", tt.version, got, want)
+			}
+		})
 	}
 }
