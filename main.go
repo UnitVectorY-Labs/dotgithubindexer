@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -421,7 +422,7 @@ func extractActionUses(workflowContent string, repoName string, filePath string)
 	var uses []ActionUse
 
 	// Parse the YAML content
-	var workflow map[string]interface{}
+	var workflow map[string]any
 	err := yaml.Unmarshal([]byte(workflowContent), &workflow)
 	if err != nil {
 		fmt.Printf("Error parsing YAML for %s/%s: %v\n", repoName, filePath, err)
@@ -429,27 +430,27 @@ func extractActionUses(workflowContent string, repoName string, filePath string)
 	}
 
 	// Navigate through jobs
-	jobs, ok := workflow["jobs"].(map[string]interface{})
+	jobs, ok := workflow["jobs"].(map[string]any)
 	if !ok {
 		return uses
 	}
 
 	// Iterate through each job
 	for _, jobData := range jobs {
-		job, ok := jobData.(map[string]interface{})
+		job, ok := jobData.(map[string]any)
 		if !ok {
 			continue
 		}
 
 		// Get steps from the job
-		steps, ok := job["steps"].([]interface{})
+		steps, ok := job["steps"].([]any)
 		if !ok {
 			continue
 		}
 
 		// Iterate through each step
 		for _, stepData := range steps {
-			step, ok := stepData.(map[string]interface{})
+			step, ok := stepData.(map[string]any)
 			if !ok {
 				continue
 			}
@@ -489,8 +490,8 @@ func parseUsesString(usesStr string, workflowContent string) (action string, ver
 	version = parts[1]
 
 	// Look for the uses line in the original content to get any inline comment
-	lines := strings.Split(workflowContent, "\n")
-	for _, line := range lines {
+	lines := strings.SplitSeq(workflowContent, "\n")
+	for line := range lines {
 		trimmedLine := strings.TrimSpace(line)
 		// Check if this line contains our uses statement
 		if strings.Contains(trimmedLine, "uses:") && strings.Contains(trimmedLine, usesStr) {
@@ -499,9 +500,9 @@ func parseUsesString(usesStr string, workflowContent string) (action string, ver
 			usesEndIdx := strings.Index(trimmedLine, usesStr) + len(usesStr)
 			if usesEndIdx < len(trimmedLine) {
 				remainingLine := trimmedLine[usesEndIdx:]
-				if commentIdx := strings.Index(remainingLine, "#"); commentIdx != -1 {
+				if _, after, ok := strings.Cut(remainingLine, "#"); ok {
 					// Extract the comment part (after the #)
-					comment := strings.TrimSpace(remainingLine[commentIdx+1:])
+					comment := strings.TrimSpace(after)
 					if comment != "" {
 						version = version + " # " + comment
 					}
@@ -523,8 +524,8 @@ func extractCategory(content string) string {
 
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, prefix) {
-			category := strings.TrimSpace(strings.TrimPrefix(trimmed, prefix))
+		if after, ok := strings.CutPrefix(trimmed, prefix); ok {
+			category := strings.TrimSpace(after)
 			if category != "" {
 				return category
 			}
@@ -703,10 +704,8 @@ func updateRepositoriesManifest(dbPath string, repoName string) error {
 	}
 
 	// Add repo if not exists
-	for _, r := range manifest.Repositories {
-		if r == repoName {
-			return nil
-		}
+	if slices.Contains(manifest.Repositories, repoName) {
+		return nil
 	}
 	manifest.Repositories = append(manifest.Repositories, repoName)
 
