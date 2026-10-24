@@ -11,3 +11,4 @@ config:
   gitignore: [
     "db/"
   ]
+  osv: sarif
