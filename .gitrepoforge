@@ -6,8 +6,6 @@ config:
   language: go
   release: release-go
   justfile: true
-  codecov:
-    enabled: true
   gitignore: [
     "db/"
   ]
